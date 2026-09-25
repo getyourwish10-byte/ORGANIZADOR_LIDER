@@ -1,1109 +1,1296 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Organizador Inteligente de Pedidos (uniformes) — Gemini (Texto e Visão - google-genai)
+Gerador Profissional de Orçamentos
 Desenvolvido por: Douglas Oliveira | getyourwish10@gmail.com
+
+Otimizado para:
+- Carregar logotipos e carimbos dinamicamente via interface (Tkinter)
+- Salvar automaticamente o último diretório das logos e carimbos
+- Centralizar o bloco de Valores Totais
+- GERAÇÃO MULTIPÁGINA: Suporte a listas longas sem cortar o orçamento
+- SALVAR/CARREGAR PROJETO: Permite salvar orçamentos em andamento (.json) para edição futura
+- TEMPLATES EXCLUSIVOS: Cores exclusivas para cada empresa (Marinho, Laranja, P&B, Azul Royal)
+- ORDENAÇÃO ALEATÓRIA INTELIGENTE: Itens embaralhados nos concorrentes com numeração sequencial crescente
+- ABERTURA AUTOMÁTICA OPCIONAL E PADRÃO JPG DE ALTA QUALIDADE
 """
 
 from __future__ import annotations
 
-import base64
-import copy
-import csv
-import hashlib
 import json
 import os
+import platform
 import re
-import shutil
 import subprocess
-import sys
-import tempfile
-import threading
-import time
-import urllib.error
-import urllib.request
-import webbrowser
-from collections import Counter
-from datetime import datetime
-from typing import Callable, Dict, List, Optional, Tuple
+import textwrap
+import random
+import copy
+from dataclasses import dataclass
+from functools import lru_cache
+from typing import List, Optional, Tuple, Callable
 
 import tkinter as tk
-from tkinter import ttk, scrolledtext, messagebox, filedialog
+from tkinter import ttk, messagebox, filedialog
 
-__version__ = "1.7.3"
-URL_VERSAO_REMOTE = "https://raw.githubusercontent.com/getyourwish10-byte/ORGANIZADOR_LIDER/refs/heads/main/version.json"
+from PIL import Image, ImageDraw, ImageFont, ImageEnhance
 
+# Compatibilidade de versão do Pillow para Resampling
 try:
-    import openpyxl
-    from openpyxl.styles import Font, PatternFill, Alignment
-    OPENPYXL_DISPONIVEL = True
-except ImportError:
-    OPENPYXL_DISPONIVEL = False
-
-try:
-    from PIL import Image, ImageGrab, ImageOps
-    PIL_DISPONIVEL = True
-except ImportError:
-    PIL_DISPONIVEL = False
-
-try:
-    import pytesseract
-    PYTESSERACT_DISPONIVEL = True
-    if not shutil.which("tesseract"):
-        for _caminho in (r"C:\Program Files\Tesseract-OCR\tesseract.exe",
-                         r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
-                         os.path.expandvars(r"%LOCALAPPDATA%\Tesseract-OCR\tesseract.exe")):
-            if os.path.isfile(_caminho):
-                pytesseract.pytesseract.tesseract_cmd = _caminho
-                break
-except ImportError:
-    PYTESSERACT_DISPONIVEL = False
-
-try:
-    from google import genai
-    from google.genai import types
-    GEMINI_DISPONIVEL = True
-    GEMINI_API_KEY = "AQ.Ab8RN6IQWMqG23r21vC33BMkc7agknCeYDMYWvB7ECU94W6KOw"
-    
-    # Força a variável de ambiente para o novo SDK reconhecer a chave sem erros de OAuth
-    if GEMINI_API_KEY and GEMINI_API_KEY != "COLE_SUA_CHAVE_GEMINI_AQUI":
-        os.environ["GEMINI_API_KEY"] = GEMINI_API_KEY
-        CLIENTE_GEMINI = genai.Client(api_key=GEMINI_API_KEY)
-    else:
-        CLIENTE_GEMINI = None
-except ImportError:
-    GEMINI_DISPONIVEL = False
-    CLIENTE_GEMINI = None
+    RESAMPLE = Image.Resampling.LANCZOS
+except AttributeError:
+    RESAMPLE = Image.LANCZOS
 
 
-CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".organizador_pedidos_config.json")
-HISTORICO_MAXIMO = 30
-COLUNAS = ("NOME", "TAMANHO DE CAMISA", "NÚMERO", "TAMANHO DE CALÇÃO")
-COLUNAS_TAMANHO = ("TAMANHO DE CAMISA", "TAMANHO DE CALÇÃO")
-PREENCHIMENTO = {"TAMANHO DE CAMISA": "SEM TAMANHO", "NÚMERO": "SEM NÚMERO", "TAMANHO DE CALÇÃO": "SEM CALÇÃO"}
-VALORES_VAZIOS = {"", "SEM NOME", "SEM TAMANHO", "SEM NÚMERO", "SEM CALÇÃO"}
+# ==========================================================================
+# Utilitários gerais e Configurações
+# ==========================================================================
 
-ORDEM_PADRAO = [
-    "G4", "G3", "G2", "GG", "G", "M", "P", "G1",
-    "BLG3", "BLG2", "BLGG", "BLG", "BLM", "BLP", "BLPP",
-    "13_14_PP", "11_12_GG_INF", "8_10_G_INF", "6_7_M_INF",
-    "4_5_P_INF", "2_3_PP_INF", "1_BB", "0_RN",
-]
+PASTA_PADRAO_ORCAMENTOS = os.path.join(os.path.expanduser("~"), "Desktop", "ORÇAMENTOS")
+ARQUIVO_CONFIG = os.path.join(PASTA_PADRAO_ORCAMENTOS, "config_logos.json")
 
-CONVERSOES_PADRAO = {
-    "EXG": "G2", "EXGG": "G3", "G1": "GG",
-    "BLG1": "BLGG", "BABYLOOK G1": "BLGG",
-    "PP": "13_14_PP", "13 A 14 ANOS": "13_14_PP", "13 A 14": "13_14_PP", "13-14 ANOS": "13_14_PP",
-    "GG INFANTIL": "11_12_GG_INF", "INFANTIL GG": "11_12_GG_INF", "11 A 12 ANOS": "11_12_GG_INF", "11 A 12": "11_12_GG_INF", "11-12 ANOS": "11_12_GG_INF",
-    "G INFANTIL": "8_10_G_INF", "INFANTIL G": "8_10_G_INF", "8 A 10 ANOS": "8_10_G_INF", "8 A 10": "8_10_G_INF", "8-10 ANOS": "8_10_G_INF",
-    "M INFANTIL": "6_7_M_INF", "INFANTIL M": "6_7_M_INF", "6 A 7 ANOS": "6_7_M_INF", "6 A 7": "6_7_M_INF", "6-7 ANOS": "6_7_M_INF",
-    "P INFANTIL": "4_5_P_INF", "INFANTIL P": "4_5_P_INF", "4 A 5 ANOS": "4_5_P_INF", "4 A 5": "4_5_P_INF", "4-5 ANOS": "4_5_P_INF",
-    "PP INFANTIL": "2_3_PP_INF", "INFANTIL PP": "2_3_PP_INF", "2 A 3 ANOS": "2_3_PP_INF", "2 A 3": "2_3_PP_INF", "2-3 ANOS": "2_3_PP_INF",
-}
-
-def versao_tupla(versao: str) -> Tuple[int, ...]:
-    return tuple(int(n) for n in re.findall(r"\d+", str(versao)))
+def formatar_valor(valor: float) -> str:
+    """Formata um float para o padrão monetário brasileiro: 1.500,00."""
+    return f"{valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
-def executar_com_retry_gemini(funcao_api, *args, max_tentativas=6, espera_base=3, **kwargs):
-    for tentativa in range(1, max_tentativas + 1):
+def limpar_numero(texto: str) -> float:
+    """Converte texto com vírgula/ponto em float, com segurança."""
+    texto = str(texto).replace("R$", "").strip()
+    if not texto:
+        return 0.0
+    if "." in texto and "," in texto:
+        texto = texto.replace(".", "").replace(",", ".")
+    elif "," in texto:
+        texto = texto.replace(",", ".")
+    try:
+        return float(texto)
+    except ValueError:
+        return 0.0
+
+
+def limpar_nome_arquivo(texto: str) -> str:
+    """Remove caracteres inválidos e troca espaços por '_' para arquivos."""
+    texto = str(texto).upper()
+    texto = re.sub(r"[^A-Z0-9ÀÁÂÃÄÅÇÈÉÊËÌÍÎÏÑÒÓÔÕÖÙÚÛÜ _-]", "", texto)
+    return re.sub(r"\s+", "_", texto.strip()) or "SEM_NOME"
+
+
+def abrir_arquivo(caminho: str) -> None:
+    """Abre o arquivo gerado com o programa padrão do sistema operacional."""
+    if not os.path.exists(caminho):
+        return
+    try:
+        sistema = platform.system()
+        if sistema == "Windows":
+            os.startfile(caminho)
+        elif sistema == "Darwin":
+            subprocess.call(["open", caminho])
+        else:
+            subprocess.call(["xdg-open", caminho])
+    except Exception as exc:
+        print(f"Não foi possível abrir '{caminho}' automaticamente: {exc}")
+
+
+def carregar_config_logos() -> dict:
+    """Carrega os caminhos das logos e carimbos salvos na última sessão."""
+    if os.path.exists(ARQUIVO_CONFIG):
         try:
-            return funcao_api(*args, **kwargs)
-        except Exception as e:
-            erro_str = str(e).lower()
-            if any(termo in erro_str for termo in ["exhausted", "503", "overloaded", "resource_exhausted", "quota", "unavailable", "congestion"]):
-                if tentativa < max_tentativas:
-                    time.sleep(espera_base * tentativa)
-                    continue
-            raise e
+            with open(ARQUIVO_CONFIG, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def salvar_config_logos(logos: dict) -> None:
+    """Salva os caminhos das logos e carimbos para não precisar selecionar novamente."""
+    os.makedirs(PASTA_PADRAO_ORCAMENTOS, exist_ok=True)
+    try:
+        with open(ARQUIVO_CONFIG, 'w', encoding='utf-8') as f:
+            json.dump(logos, f, ensure_ascii=False, indent=4)
+    except Exception as exc:
+        print(f"Erro ao salvar config: {exc}")
 
 
 # ==========================================================================
-# Parser (independente da interface)
+# Cache de Fontes e Imagens
 # ==========================================================================
-LETRA = "A-Z0-9À-Ÿ"
-ANTES = rf"(?<![{LETRA}])"
-DEPOIS = rf"(?![{LETRA}])"
-SEP = r"[\s\-:/;.,]*"
-CALCAO = r"(?:CAL[CÇ][AÃ]O|CALS[AÃ]O|CAUCAO|SHORT[ES]?|BERMUDA)"
-CAMISA = r"(?:CAMISETA|CAMISA|CAMIZA|BLUSA)"
-VALOR_NUMERO = r"(?:\d+|PI|π)"
 
-RE_IGNORAR = re.compile(r"PATROCÍNIO|NUMERAÇÃO|JOGO|MATERIAL|PENHAROL")
-RE_SUBSTITUTO = re.compile(r"^\*?\s*SUB\s*\d+")
-RE_ENUMERACAO = re.compile(r"^\s*\d+\s*[-.)]\s*")
-RE_SEM_NUMERO = re.compile(r"\bS\s*/\s*N\b")
-RE_QUANTIDADE = re.compile(r"^\s*\*?\s*(\d+)\s*(?:X|UN|PCT)\b")
-RE_KIT_QTD = re.compile(r"^\s*\*?\s*\d+\s")
-RE_BABYLOOK = re.compile(r"\bBABY\s*LOOK\b")
-RE_TRADICIONAL = re.compile(r"\bTRADICIONAL\b")
-RE_NUM_EXPLICITO = re.compile(rf"{ANTES}(?:N[UÚ]MERO|NUM\.?|N[º°O.]|N)[\s\-:;]*({VALOR_NUMERO}){DEPOIS}|#\s*({VALOR_NUMERO}){DEPOIS}")
-RE_NUM_BARRA = re.compile(rf"[/\-]\s*({VALOR_NUMERO}){DEPOIS}")
-RE_NUM_SOLTO = re.compile(rf"{ANTES}(\d{{1,3}}|PI|π){DEPOIS}")
-RE_PALAVRAS_REMOVER = re.compile(
-    r"\b(?:ESCREVER|COM|SEM|NOME|AVULS[AO]S?|CAMISETAS?|CAMISAS?|CAMIZAS?|BLUSAS?|BABY\s*LOOK|TRADICIONAL|ADULTO|INFANTIL|"
-    r"KITS?|GOLEIRO|DE|E|CONJUNTOS?|CAL[CÇ][AÃ]O|CALS[AÃ]O|CAUCAO|SHORT[ES]?|BERMUDA|TAMANHO|TAM|T|"
-    r"N[UÚ]MERO|NUM|N[º°O]|N)\b\.?|#"
-)
-RE_PONTAS = re.compile(r"^[\-/:,._–—*\s]+|[\-/:,._–—*\s]+$")
-RE_CARACTERES_INVALIDOS = re.compile(r"[^A-Z0-9À-Ÿ'\-\s]")
-RE_HIFEN_SOLTO = re.compile(r"(^|\s)[\-']+(\s|$)")
-RE_FICHA = re.compile(r"(?:tamanho|nome|n[úu]mero)[/\s]*:", re.IGNORECASE)
-RE_SEPARADOR_BLOCOS = re.compile(r"_{3,}|-{3,}")
-RE_FICHA_INICIO_TAM = re.compile(r"^\s*(?:TAMANHO|TAM)\b", re.IGNORECASE)
-RE_FICHA_TEM_DADO = re.compile(r"NOME|N[ÚU]MERO|\d+", re.IGNORECASE)
-RE_FICHA_TAM = re.compile(r"\b(?:TAMANHO|TAM)\b\.?")
-RE_FICHA_NUM = re.compile(rf"N[ÚU]MERO[^\d:\n]*:?\s*({VALOR_NUMERO}){DEPOIS}")
-RE_FICHA_PREFIXO_NOME = re.compile(r"^(nome(\s+na\s+camisa|\s+da\s+camisa)?)[/\s]*:?\s*", re.IGNORECASE)
+class Fontes:
+    """Cache de fontes TrueType com fallback multiplataforma."""
+    _BOLD = ["arialbd.ttf", "Arial Bold.ttf", "DejaVuSans-Bold.ttf"]
+    _REGULAR = ["arial.ttf", "Arial.ttf", "DejaVuSans.ttf"]
+    _cache: dict = {}
 
-def _remover(texto: str, m: re.Match) -> str:
-    return f"{texto[:m.start()]} {texto[m.end():]}"
+    @classmethod
+    def _carregar(cls, candidatos: List[str], tamanho: int) -> ImageFont.FreeTypeFont:
+        chave = (tuple(candidatos), tamanho)
+        if chave in cls._cache:
+            return cls._cache[chave]
+        for nome in candidatos:
+            try:
+                fonte = ImageFont.truetype(nome, tamanho)
+                cls._cache[chave] = fonte
+                return fonte
+            except (OSError, IOError):
+                continue
+        fonte = ImageFont.load_default()
+        cls._cache[chave] = fonte
+        return fonte
+
+    @classmethod
+    def bold(cls, tamanho: int) -> ImageFont.FreeTypeFont:
+        return cls._carregar(cls._BOLD, tamanho)
+
+    @classmethod
+    def regular(cls, tamanho: int) -> ImageFont.FreeTypeFont:
+        return cls._carregar(cls._REGULAR, tamanho)
 
 
-class ParserPedidos:
-    def __init__(self, ordem: List[str], conversoes: Dict[str, str]):
-        self.ordem = list(ordem)
-        self.conversoes = dict(conversoes)
-        self.posicao = {t: i for i, t in enumerate(self.ordem)}
-        termos = sorted(set(self.ordem) | set(self.conversoes), key=lambda t: (-len(t), t))
-        alternativas = "|".join(re.escape(t) for t in termos) or r"(?!)"
-        termo = rf"{ANTES}(?P<tam>{alternativas}){DEPOIS}"
-        self.re_termo = re.compile(termo)
-        self.re_calcao = re.compile(rf"{ANTES}(?:TAMANHO\s+(?:D[AEO]\s+)?{CALCAO}|{CALCAO}\s+TAMANHO|{CALCAO}){SEP}{termo}")
-        self.re_camisa = re.compile(
-            rf"{ANTES}(?:TAMANHO\s+(?:D[AEO]\s+)?{CAMISA}|{CAMISA}\s+TAMANHO|TAMANHO|TAM\.|TAM|T|{CAMISA}|BABY\s*LOOK|TRADICIONAL){SEP}{termo}"
-        )
+@lru_cache(maxsize=16)
+def carregar_logo(caminho: str) -> Optional[Image.Image]:
+    """Carrega uma logo ou carimbo do disco e mantém em cache."""
+    if not caminho or not os.path.isfile(caminho):
+        return None
+    try:
+        img = Image.open(caminho)
+        return img.convert("RGBA") if img.mode != "RGBA" else img
+    except Exception as exc:
+        print(f"Erro ao carregar imagem ({caminho}): {exc}")
+        return None
 
-    def converter(self, tamanho: str) -> str:
-        if not tamanho or "SEM" in tamanho: return ""
-        return self.conversoes.get(tamanho, tamanho)
 
-    def _babylook(self, tamanho: str, eh_tradicional: bool) -> str:
-        if eh_tradicional or not tamanho or tamanho.startswith("BL"):
-            return self.converter(tamanho)
-        for candidato in ("BL" + tamanho, "BL" + self.converter(tamanho)):
-            convertido = self.conversoes.get(candidato, candidato)
-            if convertido in self.posicao: return convertido
-        return self.converter(tamanho)
+# ==========================================================================
+# Modelos de Dados
+# ==========================================================================
 
-    def peso(self, pedido: dict) -> Tuple[int, int]:
-        camisa, calcao = pedido["TAMANHO DE CAMISA"], pedido["TAMANHO DE CALÇÃO"]
-        if camisa in self.posicao: return (self.posicao[camisa], 0)
-        if calcao in self.posicao: return (self.posicao[calcao], 1)
-        return (999, 99)
+@dataclass
+class ItemOrcamento:
+    numero: str
+    descricao: str
+    unidade: str
+    quantidade: float
+    valor_unitario: float
+
+
+@dataclass
+class DadosCabecalho:
+    cidade: str
+    data: str
+    ac: str
+    condicao_pagamento: str
+    prazo_entrega: str
+    validade: str
+    pasta_destino: str
+
+
+@dataclass
+class LogosEmpresas:
+    nahora: str
+    dakar: str
+    lider_comercio: str
+    lider_sport: str
+    carimbo_nahora: str = ""
+    carimbo_dakar: str = ""
+    carimbo_lider_comercio: str = ""
+    carimbo_lider_sport: str = ""
+
+
+# ==========================================================================
+# Geração das Imagens/PDF
+# ==========================================================================
+
+class GeradorOrcamento:
+    LARGURA, ALTURA = 2371, 3410
+
+    def __init__(self, cabecalho: DadosCabecalho, itens: List[ItemOrcamento], formato: str, logos: LogosEmpresas):
+        self.cab = cabecalho
+        self.itens = itens
+        self.formato = formato.upper()
+        self.logos = logos
+
+    def _nova_pagina(self) -> Image.Image:
+        return Image.new("RGB", (self.LARGURA, self.ALTURA), "white")
+
+    def _colar_logo(self, img: Image.Image, caminho_logo: str, x: int, y: int, max_w: int, max_h: int) -> None:
+        logo = carregar_logo(caminho_logo)
+        if not logo:
+            return
+        logo = logo.copy()
+        logo.thumbnail((max_w, max_h), RESAMPLE)
+        w, h = logo.size
+        img.paste(logo, (x + (max_w - w) // 2, y + (max_h - h) // 2), logo)
+
+    def _colar_carimbo(self, img: Image.Image, caminho_carimbo: str, x: int, y: int, max_w: int, max_h: int) -> None:
+        carimbo = carregar_logo(caminho_carimbo)
+        if not carimbo:
+            return
+        carimbo = carimbo.copy()
+        carimbo.thumbnail((max_w, max_h), RESAMPLE)
+        w, h = carimbo.size
+        img.paste(carimbo, (x + (max_w - w) // 2, y + (max_h - h) // 2), carimbo)
+
+    def _marca_dagua(self, img: Image.Image, caminho_logo: str) -> None:
+        logo = carregar_logo(caminho_logo)
+        if not logo:
+            return
+        w0, h0 = logo.size
+        largura_alvo = 1300
+        altura_alvo = int(h0 * (largura_alvo / w0))
+        logo = logo.resize((largura_alvo, altura_alvo), RESAMPLE)
+        alpha = ImageEnhance.Brightness(logo.split()[3]).enhance(0.06)
+        logo.putalpha(alpha)
+        x = (self.LARGURA - largura_alvo) // 2
+        y = (self.ALTURA - altura_alvo) // 2
+        img.paste(logo, (x, y), logo)
 
     @staticmethod
-    def novo_pedido(nome="", camisa="", numero="", calcao="") -> dict:
-        return {"NOME": nome.upper(), "TAMANHO DE CAMISA": camisa, "NÚMERO": numero, "TAMANHO DE CALÇÃO": calcao}
-
-    def processar(self, texto: str, preencher: bool = True) -> Tuple[List[dict], List[str]]:
-        texto = re.sub(r"Número Tabela camisa da equipe:?", "", texto, flags=re.IGNORECASE)
-        if RE_FICHA.search(texto) or "___" in texto:
-            pedidos, nao_reconhecidas = self._processar_fichas(texto)
-        else:
-            pedidos, nao_reconhecidas = self._processar_linhas(texto)
-        if preencher:
-            for p in pedidos:
-                for coluna, padrao in PREENCHIMENTO.items():
-                    if not p[coluna]: p[coluna] = padrao
-        pedidos.sort(key=self.peso)
-        return pedidos, nao_reconhecidas
-
-    def _processar_linhas(self, texto: str) -> Tuple[List[dict], List[str]]:
-        pedidos: List[dict] = []
-        nao_reconhecidas: List[str] = []
-        contexto_camisa = contexto_calcao = ""
-        for original in texto.splitlines():
-            original = original.strip()
-            if not original: continue
-            linha = RE_ENUMERACAO.sub("", original.upper())
-            linha = RE_SEM_NUMERO.sub(" ", linha)
-            if RE_IGNORAR.search(linha) or RE_SUBSTITUTO.match(linha): continue
-
-            quantidade = 1
-            eh_kit, eh_conjunto = "KIT" in linha, "CONJUNTO" in linha
-            eh_babylook = bool(RE_BABYLOOK.search(linha))
-            eh_tradicional = bool(RE_TRADICIONAL.search(linha))
-            
-            if eh_tradicional:
-                eh_babylook = False
-
-            if eh_kit: linha = RE_KIT_QTD.sub(" ", linha, count=1)
+    def _quebrar_texto(draw: ImageDraw.ImageDraw, texto: str, fonte, largura_max: int) -> List[str]:
+        linhas: List[str] = []
+        atual = ""
+        for palavra in texto.split():
+            while draw.textlength(palavra, font=fonte) > largura_max:
+                corte = len(palavra)
+                while corte > 1 and draw.textlength(palavra[:corte], font=fonte) > largura_max:
+                    corte -= 1
+                if atual:
+                    linhas.append(atual)
+                    atual = ""
+                linhas.append(palavra[:corte])
+                palavra = palavra[corte:]
+            teste = f"{atual} {palavra}".strip()
+            if draw.textlength(teste, font=fonte) <= largura_max:
+                atual = teste
             else:
-                m = RE_QUANTIDADE.search(linha)
-                if m: quantidade, linha = int(m.group(1)), _remover(linha, m)
-            if "AVULSA" in linha or "AVULSO" in linha: contexto_calcao = ""
+                if atual:
+                    linhas.append(atual)
+                atual = palavra
+        if atual:
+            linhas.append(atual)
+        return linhas or [""]
 
-            tam_calcao = tam_camisa = ""
-            m = self.re_calcao.search(linha)
-            if m: tam_calcao, linha = m.group("tam"), _remover(linha, m)
-            m = self.re_camisa.search(linha)
-            if m: tam_camisa, linha = m.group("tam"), _remover(linha, m)
+    @staticmethod
+    def _texto_centralizado(draw, texto, fonte, x, largura, y, cor="white"):
+        w = draw.textlength(texto, font=fonte)
+        draw.text((x + (largura - w) / 2, y), texto, fill=cor, font=fonte)
 
-            soltos = []
+    @staticmethod
+    def _texto_direita(draw, texto, fonte, x_direita, y, cor="white"):
+        w = draw.textlength(texto, font=fonte)
+        draw.text((x_direita - w, y), texto, fill=cor, font=fonte)
+
+    def _desenhar_tabela(
+        self, draw: ImageDraw.ImageDraw, acrescimo: float, y_topo: int, 
+        col_x: List[int], col_w: List[int], cor_cabecalho: str, 
+        nova_pagina_callback: Callable[[], Tuple[ImageDraw.ImageDraw, int]], 
+        modo_compacto: bool = False,
+        cor_borda: str = "#94a3b8",
+        cor_texto_cab: str = "white",
+        itens: Optional[List[ItemOrcamento]] = None
+    ) -> Tuple[ImageDraw.ImageDraw, int, float]:
+        
+        lista_itens = itens if itens is not None else self.itens
+        f_head = Fontes.bold(45)
+        f_head_pequena = Fontes.bold(34)
+        f_norm = Fontes.regular(40)
+
+        headers = (
+            ["Nº", "DESCRIÇÃO", "PREÇO", "QTD", "TOTAL"]
+            if modo_compacto else ["Nº", "DESCRIÇÃO", "UND", "QTD", "VALOR UNIT.", "VALOR TOTAL"]
+        )
+
+        def desenhar_cabecalho(d: ImageDraw.ImageDraw, y_t: int) -> int:
+            d.rectangle([150, y_t, 2221, y_t + 100], fill=cor_cabecalho, outline=cor_borda, width=2)
+            for i, h in enumerate(headers):
+                fonte_col = f_head_pequena if (not modo_compacto and i in (4, 5)) else f_head
+                self._texto_centralizado(d, h, fonte_col, col_x[i], col_w[i], y_t + 28, cor=cor_texto_cab)
+            for x in col_x[1:]:
+                d.line([(x, y_t), (x, y_t + 100)], fill=cor_texto_cab, width=2)
+            return y_t + 100
+
+        y = desenhar_cabecalho(draw, y_topo)
+        total_geral = 0.0
+        largura_desc = col_w[1] - 60
+
+        for item in lista_itens:
+            valor_unit = item.valor_unitario + acrescimo
+            valor_total = item.quantidade * valor_unit
+            qtd_str = str(int(item.quantidade)) if float(item.quantidade).is_integer() else str(item.quantidade)
+
+            linhas_desc = self._quebrar_texto(draw, item.descricao, f_norm, largura_desc)
+            altura = max(120, len(linhas_desc) * 50 + 40)
+
+            if y + altura > 2450:
+                draw, y_novo = nova_pagina_callback()
+                y = desenhar_cabecalho(draw, y_novo)
+
+            total_geral += valor_total
+            draw.rectangle([150, y, 2221, y + altura], fill="white", outline=cor_borda, width=2)
+
+            valores = [item.numero, f"R$ {formatar_valor(valor_unit)}", qtd_str, f"R$ {formatar_valor(valor_total)}"] if modo_compacto \
+                else [item.numero, item.unidade, qtd_str, f"R$ {formatar_valor(valor_unit)}", f"R$ {formatar_valor(valor_total)}"]
+
+            self._texto_centralizado(draw, valores[0], f_norm, col_x[0], col_w[0], y + (altura - 40) / 2, cor="#111827")
+
+            y_txt = y + (altura - len(linhas_desc) * 45) / 2
+            for linha in linhas_desc:
+                draw.text((col_x[1] + 30, y_txt), linha, fill="#111827", font=f_norm)
+                y_txt += 45
+
+            for i in range(2, len(col_x)):
+                self._texto_centralizado(draw, valores[i - 1], f_norm, col_x[i], col_w[i], y + (altura - 40) / 2, cor="#111827")
+
+            for x in col_x[1:]:
+                draw.line([(x, y), (x, y + altura)], fill=cor_borda, width=2)
+            y += altura
+
+        return draw, y, total_geral
+
+    def _rodape_condicoes(self, draw, y: int, cor_texto: str = "#b91c1c") -> int:
+        f_pag = Fontes.bold(34)
+        texto = f"CONDIÇÃO DE PAGAMENTO: {self.cab.condicao_pagamento}"
+        for linha in textwrap.wrap(texto, width=65):
+            self._texto_centralizado(draw, linha, f_pag, 0, self.LARGURA, y, cor=cor_texto)
+            y += 45
+        return y + 30
+
+    def _bloco_total_prazo(self, draw, y: int, total: float, fundo: str = "#1e293b", texto_cor: str = "white", cor_borda: str = "#94a3b8", cor_fundo_total: str = "#e2e8f0", cor_texto_total: str = "#0f172a") -> int:
+        f_bold = Fontes.bold(52)
+        f_title = Fontes.bold(85)
+        
+        draw.rectangle([150, y, 1400, y + 180], fill=fundo, outline=cor_borda, width=2)
+        draw.text((180, y + 30), f"PRAZO DE ENTREGA: {self.cab.prazo_entrega}", fill=texto_cor, font=f_bold)
+        draw.text((180, y + 100), f"VALIDADE DA PROPOSTA: {self.cab.validade}", fill=texto_cor, font=f_bold)
+
+        tot_str = f"R$ {formatar_valor(total)}"
+        x_box = 1550         
+        w_box = 2221 - 1550  
+        
+        draw.rectangle([x_box, y, 2221, y + 180], fill=cor_fundo_total, outline=cor_borda, width=2)
+        self._texto_centralizado(draw, tot_str, f_title, x_box, w_box, y + 45, cor=cor_texto_total)
+        
+        return y + 240
+
+    def _cabecalho_titulo_logo(self, img, draw, caminho_logo: str, caminho_carimbo: str, cor_fundo: str, cor_titulo: str, cor_sub: str, cor_borda_ac: str = "#cbd5e1", cor_fundo_ac: str = "#f3f4f6", cor_texto_ac: str = "#1f2937") -> None:
+        f_title = Fontes.bold(85)
+        f_bold = Fontes.bold(52)
+
+        if cor_fundo and cor_fundo.lower() not in ["white", "#ffffff"]:
+            draw.rectangle([0, 0, self.LARGURA, 260], fill=cor_fundo)
+            y_logo, y_titulo, y_sub, max_h_logo = 35, 45, 145, 190
+        else:
+            y_logo, y_titulo, y_sub, max_h_logo = 50, 50, 150, 230
+
+        self._colar_logo(img, caminho_logo, 150, y_logo, 950, max_h_logo)
+        
+        if caminho_carimbo:
+            self._colar_carimbo(img, caminho_carimbo, 1130, y_logo, 450, max_h_logo)
+
+        self._texto_direita(draw, "ORÇAMENTO", f_title, 2221, y_titulo, cor=cor_titulo)
+        self._texto_direita(draw, f"{self.cab.cidade} - {self.cab.data}", f_bold, 2221, y_sub, cor=cor_sub)
+
+        draw.rectangle([150, 320, 2221, 410], fill=cor_fundo_ac, outline=cor_borda_ac, width=2)
+        draw.text((180, 345), f"A/C: {self.cab.ac}", fill=cor_texto_ac, font=f_bold)
+
+    def _bloco_bancario_duas_colunas(self, draw, y: int, titulo_esq: str, linhas_esq, titulo_dir: str, linhas_dir, cor_borda: str = "#cbd5e1", cor_titulo: str = "#1e293b", cor_fundo: str = "#f8fafc", cor_texto: str = "#111827") -> int:
+        f_banco = Fontes.bold(40)
+        draw.rectangle([385, y, 1985, y + 200], fill=cor_fundo, outline=cor_borda, width=2)
+        draw.line([(1185, y), (1185, y + 200)], fill=cor_borda, width=2)
+
+        self._texto_centralizado(draw, titulo_esq, f_banco, 385, 800, y + 40, cor=cor_titulo)
+        y_atual = y + 110
+        for texto, fonte in linhas_esq:
+            self._texto_centralizado(draw, texto, fonte, 385, 800, y_atual, cor=cor_texto)
+            y_atual += 60
+
+        self._texto_centralizado(draw, titulo_dir, f_banco, 1185, 800, y + 25, cor=cor_titulo)
+        y_atual = y + 80
+        for texto, fonte in linhas_dir:
+            self._texto_centralizado(draw, texto, fonte, 1185, 800, y_atual, cor=cor_texto)
+            y_atual += 55
+        return y + 240
+
+    def _salvar(self, paginas: List[Image.Image], prefixo_empresa: str) -> str:
+        pasta = self.cab.pasta_destino.strip() or PASTA_PADRAO_ORCAMENTOS
+        os.makedirs(pasta, exist_ok=True)
+
+        base = f"{limpar_nome_arquivo(self.cab.ac)}_{limpar_nome_arquivo(prefixo_empresa)}_{self.cab.data.replace('/', '-')}"
+        ext = f".{self.formato.lower()}"
+        
+        caminho_base = os.path.join(pasta, base)
+        caminho = caminho_base + ext
+
+        contador = 1
+        while os.path.exists(caminho) or any(os.path.exists(f"{caminho_base}_{contador}_Pagina_1{ext}") for _ in range(1)):
+            caminho_base = os.path.join(pasta, f"{base}_{contador}")
+            caminho = caminho_base + ext
+            contador += 1
+
+        if self.formato == "PDF":
+            paginas[0].save(caminho, "PDF", resolution=300, save_all=True, append_images=paginas[1:])
+        else:
+            if len(paginas) == 1:
+                if self.formato == "PNG":
+                    paginas[0].save(caminho, "PNG")
+                else:
+                    paginas[0].save(caminho, "JPEG", quality=95)
+            else:
+                for i, pag in enumerate(paginas):
+                    cam_pag = f"{caminho_base}_Pagina_{i+1}{ext}"
+                    if self.formato == "PNG":
+                        pag.save(cam_pag, "PNG")
+                    else:
+                        pag.save(cam_pag, "JPEG", quality=95)
+                caminho = f"{caminho_base}_Pagina_1{ext}"
+        
+        return caminho
+
+    # -------------------------------------------------------------
+    # TEMPLATE 1: NA HORA (TEMA LARANJA)
+    # -------------------------------------------------------------
+    def gerar_nahora(self, acrescimo: float, itens: Optional[List[ItemOrcamento]] = None) -> str:
+        paginas = []
+        f_bold = Fontes.bold(52)
+        f_banco = Fontes.bold(40)
+        
+        cor_primaria = "#ea580c"
+        cor_borda = "#f97316"
+        cor_fundo_destaque = "#fff7ed"
+
+        def criar_pagina(num_pag: int) -> Tuple[Image.Image, ImageDraw.ImageDraw, int]:
+            img = self._nova_pagina()
+            self._marca_dagua(img, self.logos.nahora)
+            draw = ImageDraw.Draw(img)
+            
+            if num_pag == 1:
+                self._cabecalho_titulo_logo(
+                    img, draw, self.logos.nahora, self.logos.carimbo_nahora, 
+                    cor_fundo="white", cor_titulo="#111827", cor_sub=cor_primaria, 
+                    cor_borda_ac=cor_primaria, cor_fundo_ac=cor_fundo_destaque, cor_texto_ac=cor_primaria
+                )
+                y_topo = 470
+            else:
+                self._colar_logo(img, self.logos.nahora, 150, 50, 400, 150)
+                if self.logos.carimbo_nahora:
+                    self._colar_carimbo(img, self.logos.carimbo_nahora, 580, 50, 300, 150)
+                f_title_pag = Fontes.bold(60)
+                self._texto_direita(draw, f"ORÇAMENTO - PÁGINA {num_pag}", f_title_pag, 2221, 80, cor=cor_primaria)
+                draw.line([(150, 220), (2221, 220)], fill=cor_primaria, width=2)
+                y_topo = 260
+
+            draw.rectangle([0, 3150, 2371, 3410], fill=cor_primaria)
+            draw.text((250, 3230), "Rua P-16 Nº 55 Setor dos Funcionários Goiânia - Goiás  |  Tel: (62) 3087-2424", fill="white", font=f_bold)
+            
+            return img, draw, y_topo
+
+        img, draw, y_topo = criar_pagina(1)
+        paginas.append(img)
+
+        def callback_nova_pagina():
+            img_nova, draw_novo, y_t = criar_pagina(len(paginas) + 1)
+            paginas.append(img_nova)
+            return draw_novo, y_t
+
+        col_x = [150, 300, 1200, 1550, 1850]
+        col_w = [150, 900, 350, 300, 371]
+        
+        draw, y, total = self._desenhar_tabela(
+            draw, acrescimo, y_topo, col_x, col_w, 
+            cor_cabecalho=cor_primaria, nova_pagina_callback=callback_nova_pagina, 
+            modo_compacto=True, cor_borda=cor_borda, itens=itens
+        )
+
+        if y > 2450: draw, y = callback_nova_pagina(); y += 50
+
+        y = self._rodape_condicoes(draw, y + 50, cor_texto=cor_primaria)
+        y = self._bloco_total_prazo(
+            draw, y, total, fundo=cor_primaria, texto_cor="white", 
+            cor_borda=cor_borda, cor_fundo_total=cor_fundo_destaque, cor_texto_total=cor_primaria
+        )
+
+        draw.rectangle([585, y, 1785, y + 200], fill=cor_fundo_destaque, outline=cor_borda, width=2)
+        for i, linha in enumerate(["BANCO DO BRASIL", "AG.: 3483-5  -  C/C.: 55005-1", "CNPJ: 30.339.532/0001-19"]):
+            self._texto_centralizado(draw, linha, f_banco, 585, 1200, y + 25 + i * 55, cor=cor_primaria)
+
+        return self._salvar(paginas, "NaHora")
+
+    # -------------------------------------------------------------
+    # TEMPLATE 2: DAKAR SPORT (TEMA MARINHO)
+    # -------------------------------------------------------------
+    def gerar_dakar(self, acrescimo: float, itens: Optional[List[ItemOrcamento]] = None) -> str:
+        paginas = []
+        f_bold = Fontes.bold(52)
+
+        cor_fundo_header = "#0f172a"
+        cor_primaria = "#1e3a8a"
+        cor_borda = "#94a3b8"
+
+        def criar_pagina(num_pag: int) -> Tuple[Image.Image, ImageDraw.ImageDraw, int]:
+            img = self._nova_pagina()
+            self._marca_dagua(img, self.logos.dakar)
+            draw = ImageDraw.Draw(img)
+
+            if num_pag == 1:
+                self._cabecalho_titulo_logo(
+                    img, draw, self.logos.dakar, self.logos.carimbo_dakar, 
+                    cor_fundo=cor_fundo_header, cor_titulo="white", cor_sub="#cbd5e1"
+                )
+                y_topo = 470
+            else:
+                draw.rectangle([0, 0, self.LARGURA, 220], fill=cor_fundo_header)
+                self._colar_logo(img, self.logos.dakar, 150, 40, 400, 140)
+                if self.logos.carimbo_dakar:
+                    self._colar_carimbo(img, self.logos.carimbo_dakar, 580, 40, 300, 140)
+                f_title_pag = Fontes.bold(60)
+                self._texto_direita(draw, f"ORÇAMENTO - PÁGINA {num_pag}", f_title_pag, 2221, 80, cor="white")
+                y_topo = 280
+
+            draw.rectangle([0, 3150, 2371, 3410], fill=cor_fundo_header)
+            draw.text((250, 3230), "DAKAR SPORT  -  CNPJ: 29.332.450/0001-63  -  INSC. EST.: 10.713.610-4", fill="white", font=f_bold)
+            
+            return img, draw, y_topo
+
+        img, draw, y_topo = criar_pagina(1)
+        paginas.append(img)
+
+        def callback_nova_pagina():
+            img_nova, draw_novo, y_t = criar_pagina(len(paginas) + 1)
+            paginas.append(img_nova)
+            return draw_novo, y_t
+
+        col_x = [150, 350, 1150, 1380, 1630, 1950]
+        col_w = [200, 800, 230, 250, 320, 271]
+        
+        draw, y, total = self._desenhar_tabela(
+            draw, acrescimo, y_topo, col_x, col_w, 
+            cor_cabecalho=cor_primaria, nova_pagina_callback=callback_nova_pagina, cor_borda=cor_borda, itens=itens
+        )
+
+        if y > 2450: draw, y = callback_nova_pagina(); y += 50
+
+        y = self._rodape_condicoes(draw, y + 50)
+        y = self._bloco_total_prazo(
+            draw, y, total, fundo=cor_primaria, texto_cor="white", cor_borda=cor_borda
+        )
+
+        y = self._bloco_bancario_duas_colunas(
+            draw, y, "PIX (CNPJ)", [("29.332.450/0001-63", f_bold)],
+            "AGÊNCIA E CONTA", [("AG: 3483-5", f_bold), ("C/C: 55104-X", f_bold)],
+            cor_borda=cor_borda, cor_titulo=cor_primaria
+        )
+
+        return self._salvar(paginas, "DakarSport")
+
+    # -------------------------------------------------------------
+    # TEMPLATE 3: LÍDER COMÉRCIO (TEMA PRETO E BRANCO)
+    # -------------------------------------------------------------
+    def gerar_lider_comercio(self, acrescimo: float, itens: Optional[List[ItemOrcamento]] = None) -> str:
+        paginas = []
+        f_bold = Fontes.bold(52)
+        f_sub = Fontes.regular(36)
+
+        cor_primaria = "#000000"
+        cor_borda = "#000000"
+        
+        def criar_pagina(num_pag: int) -> Tuple[Image.Image, ImageDraw.ImageDraw, int]:
+            img = self._nova_pagina()
+            self._marca_dagua(img, self.logos.lider_comercio)
+            draw = ImageDraw.Draw(img)
+
+            if num_pag == 1:
+                self._cabecalho_titulo_logo(
+                    img, draw, self.logos.lider_comercio, self.logos.carimbo_lider_comercio, 
+                    cor_fundo="white", cor_titulo="#000000", cor_sub="#4b5563",
+                    cor_borda_ac=cor_primaria, cor_fundo_ac="white", cor_texto_ac="#000000"
+                )
+                y_topo = 470
+            else:
+                self._colar_logo(img, self.logos.lider_comercio, 150, 40, 400, 140)
+                if self.logos.carimbo_lider_comercio:
+                    self._colar_carimbo(img, self.logos.carimbo_lider_comercio, 580, 40, 300, 140)
+                f_title_pag = Fontes.bold(60)
+                self._texto_direita(draw, f"ORÇAMENTO - PÁGINA {num_pag}", f_title_pag, 2221, 80, cor="#000000")
+                draw.line([(150, 220), (2221, 220)], fill="#000000", width=3)
+                y_topo = 280
+
+            draw.rectangle([0, 3150, 2371, 3410], fill="white")
+            draw.line([(0, 3150), (2371, 3150)], fill="#000000", width=4)
+            draw.text((150, 3195), "R JOSE SINIMBU FILHO - Nº 67 QUADRA 140A LOTE 50E", fill="#000000", font=f_sub)
+            draw.text((150, 3255), "SETOR NORTE FERROVIÁRIO - 74.063-330", fill="#000000", font=f_sub)
+            self._texto_direita(draw, "(62) 99175-7971", f_bold, 2221, 3185, cor="#000000")
+            self._texto_direita(draw, "LIDERSPORT44@GMAIL.COM", f_sub, 2221, 3260, cor="#000000")
+            
+            return img, draw, y_topo
+
+        img, draw, y_topo = criar_pagina(1)
+        paginas.append(img)
+
+        def callback_nova_pagina():
+            img_nova, draw_novo, y_t = criar_pagina(len(paginas) + 1)
+            paginas.append(img_nova)
+            return draw_novo, y_t
+
+        col_x = [150, 350, 1150, 1380, 1630, 1950]
+        col_w = [200, 800, 230, 250, 320, 271]
+        
+        draw, y, total = self._desenhar_tabela(
+            draw, acrescimo, y_topo, col_x, col_w, 
+            cor_cabecalho=cor_primaria, nova_pagina_callback=callback_nova_pagina, cor_borda=cor_borda, itens=itens
+        )
+
+        if y > 2450: draw, y = callback_nova_pagina(); y += 50
+
+        y = self._rodape_condicoes(draw, y + 50, cor_texto="#000000")
+        y = self._bloco_total_prazo(
+            draw, y, total, fundo=cor_primaria, texto_cor="white", 
+            cor_borda=cor_borda, cor_fundo_total="white", cor_texto_total="#000000"
+        )
+
+        y = self._bloco_bancario_duas_colunas(
+            draw, y, "PIX (CNPJ)", [("50.519.580/0001-04", f_bold)],
+            "AGÊNCIA E CONTA", [("3483-5 · 55510-X", f_bold), ("LÍDER COMÉRCIO", f_sub)],
+            cor_borda=cor_borda, cor_titulo="#000000", cor_fundo="white", cor_texto="#000000"
+        )
+
+        return self._salvar(paginas, "LiderComercio")
+
+    # -------------------------------------------------------------
+    # TEMPLATE 4: LIDER SPORT (TEMA AZUL ROYAL)
+    # -------------------------------------------------------------
+    def gerar_lider_sport(self, acrescimo: float, itens: Optional[List[ItemOrcamento]] = None) -> str:
+        paginas = []
+        f_bold = Fontes.bold(52)
+        f_sub = Fontes.regular(36)
+
+        cor_fundo_header = "#1d4ed8"
+        cor_primaria = "#2563eb"
+        cor_borda = "#93c5fd"
+
+        def criar_pagina(num_pag: int) -> Tuple[Image.Image, ImageDraw.ImageDraw, int]:
+            img = self._nova_pagina()
+            self._marca_dagua(img, self.logos.lider_sport)
+            draw = ImageDraw.Draw(img)
+
+            if num_pag == 1:
+                self._cabecalho_titulo_logo(
+                    img, draw, self.logos.lider_sport, self.logos.carimbo_lider_sport, 
+                    cor_fundo=cor_fundo_header, cor_titulo="white", cor_sub="#bfdbfe",
+                    cor_borda_ac=cor_primaria, cor_fundo_ac="#eff6ff", cor_texto_ac=cor_fundo_header
+                )
+                y_topo = 470
+            else:
+                draw.rectangle([0, 0, self.LARGURA, 220], fill=cor_fundo_header)
+                self._colar_logo(img, self.logos.lider_sport, 150, 40, 400, 140)
+                if self.logos.carimbo_lider_sport:
+                    self._colar_carimbo(img, self.logos.carimbo_lider_sport, 580, 40, 300, 140)
+                f_title_pag = Fontes.bold(60)
+                self._texto_direita(draw, f"ORÇAMENTO - PÁGINA {num_pag}", f_title_pag, 2221, 80, cor="white")
+                y_topo = 280
+
+            draw.rectangle([0, 3080, 2371, 3410], fill=cor_fundo_header)
+            
+            f_rodape_bold = Fontes.bold(45)
+            f_rodape_sub = Fontes.regular(38)
+            
+            self._texto_centralizado(draw, "LÍDER SPORT LTDA. ME - CNPJ: 02.667.069/0001-07 - INSC. EST.: 10.327.650-5", f_rodape_bold, 0, self.LARGURA, 3120, cor="white")
+            self._texto_centralizado(draw, "GOIÂNIA: (62) 3291-4804 / 3293-1257  |  Rua P-16 Nº 82 - Setor dos Funcionários", f_rodape_sub, 0, self.LARGURA, 3190, cor="#bfdbfe")
+            self._texto_centralizado(draw, "BRASÍLIA: (61) 3046-2583  |  CSC 11 - Lote 02 - Lojas 03 e 04 (Sandu Sul)", f_rodape_sub, 0, self.LARGURA, 3250, cor="#bfdbfe")
+            self._texto_centralizado(draw, "www.lidersport.com.br", f_rodape_bold, 0, self.LARGURA, 3320, cor="white")
+            
+            return img, draw, y_topo
+
+        img, draw, y_topo = criar_pagina(1)
+        paginas.append(img)
+
+        def callback_nova_pagina():
+            img_nova, draw_novo, y_t = criar_pagina(len(paginas) + 1)
+            paginas.append(img_nova)
+            return draw_novo, y_t
+
+        col_x = [150, 350, 1150, 1380, 1630, 1950]
+        col_w = [200, 800, 230, 250, 320, 271]
+        
+        draw, y, total = self._desenhar_tabela(
+            draw, acrescimo, y_topo, col_x, col_w, 
+            cor_cabecalho=cor_primaria, nova_pagina_callback=callback_nova_pagina, cor_borda=cor_borda, itens=itens
+        )
+
+        if y > 2450: draw, y = callback_nova_pagina(); y += 50
+
+        y = self._rodape_condicoes(draw, y + 50, cor_texto=cor_fundo_header)
+        y = self._bloco_total_prazo(
+            draw, y, total, fundo=cor_primaria, texto_cor="white", 
+            cor_borda=cor_borda, cor_fundo_total="#eff6ff", cor_texto_total=cor_fundo_header
+        )
+
+        y = self._bloco_bancario_duas_colunas(
+            draw, y, "PIX (CNPJ)", [("02.667.069/0001-07", f_bold)],
+            "BANCO DO BRASIL", [("AG.: 3485-1", f_bold), ("C/C.: 33562-2", f_bold)],
+            cor_borda=cor_borda, cor_titulo=cor_fundo_header, cor_fundo="#eff6ff", cor_texto=cor_fundo_header
+        )
+
+        return self._salvar(paginas, "LiderSport")
+
+    def gerar(self, empresa_menor_preco: str, apenas_menor_preco: bool = False) -> List[str]:
+        geradores = {
+            "Na Hora": lambda acr, its: self.gerar_nahora(acr, its),
+            "Dakar Sport": lambda acr, its: self.gerar_dakar(acr, its),
+            "Líder Comércio": lambda acr, its: self.gerar_lider_comercio(acr, its),
+            "Lider Sport": lambda acr, its: self.gerar_lider_sport(acr, its)
+        }
+
+        caminhos = []
+
+        def criar_itens_embaralhados(itens_originais: List[ItemOrcamento], ordens_excluidas: List[tuple]) -> List[ItemOrcamento]:
+            novos_itens = copy.deepcopy(itens_originais)
+            if len(novos_itens) <= 1:
+                for i, it in enumerate(novos_itens):
+                    it.numero = str(i + 1)
+                return novos_itens
+
             while True:
-                m = self.re_termo.search(linha)
-                if not m: break
-                soltos.append(m.group("tam"))
-                linha = _remover(linha, m)
-            if not tam_camisa and soltos: tam_camisa = soltos.pop(0)
-            if not tam_calcao and soltos: tam_calcao = soltos.pop(0)
-
-            contexto_camisa = tam_camisa or contexto_camisa
-            contexto_calcao = tam_calcao or contexto_calcao
-            camisa_final = tam_camisa or contexto_camisa
-            calcao_final = tam_calcao or contexto_calcao
-            if eh_conjunto and not calcao_final and camisa_final: calcao_final = camisa_final
-
-            numero = ""
-            for regex in (RE_NUM_EXPLICITO, RE_NUM_BARRA, RE_NUM_SOLTO):
-                m = regex.search(linha)
-                if m:
-                    numero, linha = next(g for g in m.groups() if g).upper(), _remover(linha, m)
+                random.shuffle(novos_itens)
+                ordem_atual = tuple(id(x) for x in novos_itens)
+                if ordem_atual not in ordens_excluidas:
                     break
 
-            linha = RE_PALAVRAS_REMOVER.sub(" ", linha)
-            linha = RE_PONTAS.sub("", linha)
-            linha = RE_CARACTERES_INVALIDOS.sub(" ", linha)
-            nome = re.sub(r"\s+", " ", linha).strip()
-            nome = RE_HIFEN_SOLTO.sub(r"\1\2", nome).strip()
-            if nome.isdigit(): nome = ""
+            for i, it in enumerate(novos_itens):
+                it.numero = str(i + 1)
+            return novos_itens
 
-            original_up = original.upper()
-            eh_pedido = bool(numero or nome) if eh_kit else bool(numero or nome or "CAMISA" in original_up or "BABY" in original_up or "TRADICIONAL" in original_up)
-            if eh_pedido and "AVULSAS" in original_up and not tam_camisa: eh_pedido = False
+        if apenas_menor_preco:
+            caminho = geradores[empresa_menor_preco](0.0, self.itens)
+            caminhos.append(caminho)
+        else:
+            concorrentes = [emp for emp in geradores.keys() if emp != empresa_menor_preco]
+            concorrentes_escolhidos = random.sample(concorrentes, 2)
 
-            if not eh_pedido:
-                nao_reconhecidas.append(original)
-                continue
+            caminhos.append(geradores[empresa_menor_preco](0.0, self.itens))
 
-            camisa = self._babylook(camisa_final, eh_tradicional) if eh_babylook else self.converter(camisa_final)
-            calcao, numero = self.converter(calcao_final), ("" if "SEM" in numero else numero)
-            pedidos.extend(self.novo_pedido(nome, camisa, numero, calcao) for _ in range(quantidade))
-        return pedidos, nao_reconhecidas
+            acrescimos_perdedoras = [5.0, 10.0]
+            random.shuffle(acrescimos_perdedoras)
 
-    def _dividir_blocos(self, texto: str) -> List[str]:
-        if RE_SEPARADOR_BLOCOS.search(texto): return [b.strip() for b in RE_SEPARADOR_BLOCOS.split(texto) if b.strip()]
-        blocos, atual = [], []
-        for linha in (l.strip() for l in texto.splitlines()):
-            if not linha: continue
-            if RE_FICHA_INICIO_TAM.match(linha) and any(RE_FICHA_TEM_DADO.search(l) for l in atual):
-                blocos.append("\n".join(atual))
-                atual = [linha]
-            else: atual.append(linha)
-        if atual: blocos.append("\n".join(atual))
-        return blocos
+            ordens_ja_usadas = [tuple(id(x) for x in self.itens)]
 
-    def _processar_fichas(self, texto: str) -> Tuple[List[dict], List[str]]:
-        pedidos: List[dict] = []
-        nao_reconhecidas: List[str] = []
-        for bloco in self._dividir_blocos(texto):
-            tam_camisa = tam_calcao = nome = numero = ""
-            eh_conjunto = "CONJUNTO" in bloco.upper()
-            for linha in bloco.splitlines():
-                original = linha.strip()
-                if not original: continue
-                up = original.upper()
-
-                m = RE_FICHA_TAM.search(up)
-                if m:
-                    mt = self.re_termo.search(up[m.end():]) or re.search(r"(?P<tam>[A-Z0-9_]+)", up[m.end():])
-                    if mt:
-                        if re.search(CALCAO, up): tam_calcao = mt.group("tam")
-                        else: tam_camisa = mt.group("tam")
-                    continue
-                m = RE_FICHA_NUM.search(up)
-                if m:
-                    numero = m.group(1)
-                    continue
-                if "NOME" in up:
-                    partes = original.split(":", 1)
-                    if len(partes) > 1 and partes[1].strip(): nome = partes[1].strip()
-                    continue
-                if re.fullmatch(r"\d+|PI|π", up):
-                    numero = numero or up
-                    continue
-                m = self.re_termo.match(up)
-                if m and not tam_camisa:
-                    tam_camisa, original = m.group("tam"), original[m.end():].strip()
-                    up = original.upper()
-                    if not original: continue
-                if not nome and not any(k in up for k in ("TAMANHO", "NUMERO", "NÚMERO", "CONJUNTO")):
-                    nome = original
-
-            nome = re.sub(r"[\xa0\t]+", " ", RE_FICHA_PREFIXO_NOME.sub("", nome)).strip()
-            camisa = self.converter(tam_camisa)
-            calcao = self.converter(tam_calcao) or (camisa if eh_conjunto else "")
-            if nome or numero or camisa: pedidos.append(self.novo_pedido(nome, camisa, numero, calcao))
-            else: nao_reconhecidas.append(bloco)
-        return pedidos, nao_reconhecidas
+            for i, empresa in enumerate(concorrentes_escolhidos):
+                itens_embaralhados = criar_itens_embaralhados(self.itens, ordens_ja_usadas)
+                ordens_ja_usadas.append(tuple(id(x) for x in itens_embaralhados))
+                caminhos.append(geradores[empresa](acrescimos_perdedoras[i], itens_embaralhados))
+            
+        return caminhos
 
 
 # ==========================================================================
-# Interface (Padrão Tailwind CSS)
+# Interface Gráfica (Tkinter)
 # ==========================================================================
-PALETAS = {
-    "claro": {
-        "bg": "#F1F5F9",
-        "painel": "#FFFFFF",
-        "borda": "#E2E8F0",
-        "texto": "#0F172A",
-        "texto2": "#64748B",
-        "cabecalho": "#1E293B",
-        "aviso_bg": "#FEF2F2",
-        "aviso_fg": "#DC2626",
-        "aviso_txt": "#991B1B",
-        "dup_nome": "#FEE2E2",
-        "dup_num": "#FEF3C7",
-    },
-    "escuro": {
-        "bg": "#0F172A",
-        "painel": "#1E293B",
-        "borda": "#334155",
-        "texto": "#F8FAFC",
-        "texto2": "#94A3B8",
-        "cabecalho": "#020617",
-        "aviso_bg": "#450A0A",
-        "aviso_fg": "#FCA5A5",
-        "aviso_txt": "#FECACA",
-        "dup_nome": "#7F1D1D",
-        "dup_num": "#78350F",
-    },
-}
 
-class AplicativoPedidosMagico:
+class OrcamentoApp:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.geometry("1280x920")
-        self.root.minsize(1050, 720)
+        self.root.title("Gerador Profissional de Orçamentos - Douglas Oliveira")
+        self.root.geometry("1000x980")
 
-        self.ordem_tamanhos = list(ORDEM_PADRAO)
-        self.conversoes = dict(CONVERSOES_PADRAO)
-        self.preencher_padrao = tk.BooleanVar(value=True)
-        self.tema_escuro = tk.BooleanVar(value=False)
+        self.style = ttk.Style()
+        self.style.theme_use("clam")
+
+        bg_color = "#e6edf5"
+        self.root.configure(bg=bg_color)
+
+        self.style.configure(".", background=bg_color, font=("Segoe UI", 10))
+        self.style.configure("TLabel", background=bg_color, font=("Segoe UI", 10), foreground="#1a252f")
+        self.style.configure("Header.TLabel", font=("Segoe UI", 10, "bold"), foreground="#1b4f72")
+        self.style.configure("TLabelframe", background=bg_color, bordercolor="#a9cce3", lightcolor="#a9cce3", darkcolor="#a9cce3")
+        self.style.configure("TLabelframe.Label", background=bg_color, font=("Segoe UI", 11, "bold"), foreground="#154360")
+
+        self.linhas: List[dict] = []
+
+        # SISTEMA DE ROLAGEM
+        container_principal = ttk.Frame(root)
+        container_principal.pack(fill="both", expand=True)
+
+        self.canvas = tk.Canvas(container_principal, bg=bg_color, highlightthickness=0)
+        self.scrollbar = ttk.Scrollbar(container_principal, orient="vertical", command=self.canvas.yview)
+        self.scrollable_frame = ttk.Frame(self.canvas, padding=15)
+        self.scrollable_frame.bind("<Configure>", lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
+        self.canvas_window = self.canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
+        self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfig(self.canvas_window, width=e.width))
+        self.canvas.configure(yscrollcommand=self.scrollbar.set)
         
-        self.carregar_config()
-        self.parser = ParserPedidos(self.ordem_tamanhos, self.conversoes)
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.scrollbar.pack(side="right", fill="y")
+        self._bind_mousewheel()
 
-        self.pedidos_atuais: List[dict] = []
-        self.linhas_nao_reconhecidas: List[str] = []
-        self.historico: List[List[dict]] = []
-        self.futuro: List[List[dict]] = []
-        self.arquivo_atual: Optional[str] = None
-        self._agrupar = True
-        self._ordenacao_reversa: Dict[str, bool] = {}
-        self._linhas_visiveis: List[Optional[dict]] = []
-        self._tarefa_ocupada = False
-        self._cores_atuais = PALETAS["claro"]
+        self._montar_frame_logos(self.scrollable_frame)
+        self._montar_frame_meta(self.scrollable_frame)
+        self._montar_frame_tabela(self.scrollable_frame)
+        self._montar_botoes(self.scrollable_frame)
+        self._montar_rodape(self.scrollable_frame)
 
-        self.criar_interface()
-        self._configurar_atalhos()
-        self._atualizar_titulo()
-        if self.tema_escuro.get(): self.alternar_tema()
-        self.root.protocol("WM_DELETE_WINDOW", self._fechar)
+        self.adicionar_linha()
 
-        self.root.after(2000, lambda: self.verificar_atualizacoes(silencioso=True))
+    def _bind_mousewheel(self) -> None:
+        def _on_mousewheel(event):
+            if platform.system() == "Windows":
+                self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            elif platform.system() == "Darwin":
+                self.canvas.yview_scroll(int(-1 * event.delta), "units")
+            else:
+                if event.num == 4:
+                    self.canvas.yview_scroll(-1, "units")
+                elif event.num == 5:
+                    self.canvas.yview_scroll(1, "units")
 
-    def carregar_config(self) -> None:
-        try:
-            with open(CONFIG_PATH, encoding="utf-8") as f:
-                dados = json.load(f)
-        except (OSError, ValueError): return
-        if not isinstance(dados, dict): return
-        if isinstance(dados.get("ordem_tamanhos"), list) and dados["ordem_tamanhos"]:
-            self.ordem_tamanhos = [str(t) for t in dados["ordem_tamanhos"]]
-        if isinstance(dados.get("conversoes"), dict):
-            self.conversoes = {str(k): str(v) for k, v in dados["conversoes"].items()}
-        self.preencher_padrao.set(bool(dados.get("preencher_padrao", True)))
-        self.tema_escuro.set(bool(dados.get("tema_escuro", False)))
+        self.root.bind_all("<MouseWheel>", _on_mousewheel)
+        self.root.bind_all("<Button-4>", _on_mousewheel)
+        self.root.bind_all("<Button-5>", _on_mousewheel)
 
-    def salvar_config(self) -> None:
-        try:
-            with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-                json.dump({"ordem_tamanhos": self.ordem_tamanhos, "conversoes": self.conversoes,
-                           "preencher_padrao": self.preencher_padrao.get(), "tema_escuro": self.tema_escuro.get()}, 
-                           f, ensure_ascii=False, indent=2)
-        except OSError: pass
+    def _montar_frame_logos(self, main_frame: ttk.Frame) -> None:
+        self.frame_logos = ttk.LabelFrame(main_frame, text=" Logotipos e Carimbos das Empresas ", padding=12)
+        self.frame_logos.pack(fill="x", pady=5)
 
-    def _fechar(self) -> None:
-        self.salvar_config()
-        self.root.destroy()
-
-    def _na_interface(self, funcao: Callable, *args) -> None:
-        try: self.root.after(0, funcao, *args)
-        except (RuntimeError, tk.TclError): pass
-
-    def set_status(self, msg: str, progresso: Optional[int] = None) -> None:
-        if threading.current_thread() is not threading.main_thread():
-            self._na_interface(self.set_status, msg, progresso)
-            return
-        self.status_var.set(f"{datetime.now():%H:%M:%S}  |  {msg}")
-        if progresso is not None: self.progress_bar["value"] = progresso
-
-    def _em_segundo_plano(self, alvo: Callable, *args) -> bool:
-        if self._tarefa_ocupada:
-            messagebox.showinfo("Aguarde", "Já existe uma tarefa em andamento.", parent=self.root)
-            return False
-        self._tarefa_ocupada = True
-        for b in self.botoes_ia: b.config(state="disabled")
-        def executar():
-            try: alvo(*args)
-            finally:
-                self._na_interface(lambda: [setattr(self, '_tarefa_ocupada', False), 
-                                            [b.config(state="normal") for b in self.botoes_ia]])
-        threading.Thread(target=executar, daemon=True).start()
-        return True
-
-    def verificar_atualizacoes(self, silencioso: bool = True) -> None:
-        self.set_status("🔍 A verificar atualizações...", 15)
-        def tarefa():
-            try:
-                req = urllib.request.Request(URL_VERSAO_REMOTE, headers={"User-Agent": "Organizador"})
-                with urllib.request.urlopen(req, timeout=8) as resp:
-                    self._na_interface(self._resultado_atualizacao, json.loads(resp.read().decode("utf-8")), silencioso)
-            except Exception:
-                self.set_status("⚠️ Sem ligação para verificar atualizações.", 0)
-        threading.Thread(target=tarefa, daemon=True).start()
-
-    def _resultado_atualizacao(self, dados: dict, silencioso: bool) -> None:
-        remota = str(dados.get("version", ""))
-        if not remota or versao_tupla(remota) <= versao_tupla(__version__):
-            self.set_status(f"✅ Versão {__version__} atualizada.", 100)
-            if not silencioso: messagebox.showinfo("Atualizações", "Já tem a versão mais recente!", parent=self.root)
-            return
-        self.set_status(f"Nova versão {remota} disponível!", 100)
-        if messagebox.askyesno("Atualização", f"Nova versão {remota} disponível!\nNovidades:\n{dados.get('changelog', '')}\n\nAtualizar agora?", parent=self.root):
-            threading.Thread(target=self._baixar_atualizacao, args=(dados.get("url", ""), dados.get("sha256")), daemon=True).start()
-
-    def _baixar_atualizacao(self, url: str, sha256_esperado: Optional[str]) -> None:
-        caminho_atual = os.path.abspath(sys.executable if getattr(sys, "frozen", False) else sys.argv[0])
-        caminho_temp = caminho_atual + ".novo"
-        try:
-            def progresso(bloco, tamanho_bloco, total):
-                if total > 0: self.set_status(f"A descarregar... {min(90, 10 + bloco * tamanho_bloco * 80 // total)}%", 50)
-            urllib.request.urlretrieve(url, caminho_temp, reporthook=progresso)
-            with open(caminho_temp, "rb") as f:
-                if sha256_esperado and hashlib.sha256(f.read()).hexdigest().lower() != str(sha256_esperado).lower():
-                    raise ValueError("SHA256 não confere")
-        except Exception as e:
-            self.set_status("Falha na atualização.", 0)
-            return
-        self._na_interface(self._aplicar_atualizacao, caminho_atual, caminho_temp)
-
-    def _aplicar_atualizacao(self, caminho_atual: str, caminho_temp: str) -> None:
-        try:
-            if caminho_atual.lower().endswith(".py"):
-                shutil.copy2(caminho_atual, caminho_atual + ".bak")
-                os.replace(caminho_temp, caminho_atual)
-                subprocess.Popen([sys.executable, caminho_atual, *sys.argv[1:]])
-                self._fechar()
-                return
-            bat = os.path.join(tempfile.gettempdir(), "atualizar.bat")
-            with open(bat, "w", encoding="utf-8") as f:
-                f.write(f'@echo off\r\nping -n 2 127.0.0.1 > nul\r\nmove /y "{caminho_temp}" "{caminho_atual}"\r\nstart "" "{caminho_atual}"\r\ndel "%~f0"\r\n')
-            subprocess.Popen(["cmd", "/c", bat], creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-            self._fechar()
-        except Exception: pass
-
-    def _checar_gemini(self) -> bool:
-        if GEMINI_DISPONIVEL and CLIENTE_GEMINI: return True
-        messagebox.showwarning("Chave Gemini em Falta", "Verifique a chave do Gemini configurada no código.", parent=self.root)
-        return False
-
-    # ---------------------------------------------------------------- interface
-    def criar_interface(self) -> None:
-        estilo = ttk.Style()
-        estilo.theme_use("clam")
-        self.estilo = estilo
-        self.botoes_ia = []
-
-        menubar = tk.Menu(self.root)
-        m_arq = tk.Menu(menubar, tearoff=0)
-        m_arq.add_command(label="Abrir lista (.txt)...", command=self.abrir_txt, accelerator="Ctrl+O")
-        m_arq.add_command(label="Colar da área de transferência", command=self.colar_da_area_transferencia)
-        m_arq.add_separator()
-        m_arq.add_command(label="Exportar Excel (.xlsx)", command=self.salvar_em_xlsx, accelerator="Ctrl+S")
-        m_arq.add_separator()
-        m_arq.add_command(label="Sair", command=self._fechar)
-        menubar.add_cascade(label="Ficheiro", menu=m_arq)
-
-        m_edit = tk.Menu(menubar, tearoff=0)
-        m_edit.add_command(label="Desfazer (tabela)", command=self.desfazer, accelerator="Ctrl+Z")
-        m_edit.add_command(label="Refazer (tabela)", command=self.refazer, accelerator="Ctrl+Y")
-        m_edit.add_separator()
-        m_edit.add_command(label="Adicionar linha manual", command=self.adicionar_linha_manual)
-        m_edit.add_command(label="Excluir linha(s)", command=self.excluir_linhas_selecionadas, accelerator="Delete")
-        menubar.add_cascade(label="Editar", menu=m_edit)
-
-        m_conf = tk.Menu(menubar, tearoff=0)
-        m_conf.add_command(label="Tamanhos e conversões...", command=self.abrir_editor_regras)
-        m_conf.add_checkbutton(label="Preencher campos vazios", variable=self.preencher_padrao, command=self.salvar_config)
-        m_conf.add_checkbutton(label="Tema escuro", variable=self.tema_escuro, command=self.alternar_tema)
-        menubar.add_cascade(label="Configurações", menu=m_conf)
-        self.root.config(menu=menubar)
-
-        c = PALETAS["claro"]
-        self.root.configure(bg=c["bg"])
+        self.path_nahora = tk.StringVar()
+        self.path_carimbo_nahora = tk.StringVar()
+        self.path_dakar = tk.StringVar()
+        self.path_carimbo_dakar = tk.StringVar()
+        self.path_lider_comercio = tk.StringVar()
+        self.path_carimbo_lider_comercio = tk.StringVar()
+        self.path_lider_sport = tk.StringVar()
+        self.path_carimbo_lider_sport = tk.StringVar()
         
-        # CABEÇALHO
-        self.header_frame = tk.Frame(self.root, bg=c["cabecalho"], pady=20)
-        self.header_frame.pack(fill="x")
-        tk.Label(self.header_frame, text="ORGANIZADOR INTELIGENTE DE UNIFORMES — TURBO", font=("Segoe UI", 18, "bold"), bg=c["cabecalho"], fg="#FFFFFF").pack()
-        tk.Label(self.header_frame, text=f"Versão {__version__} | Integrado Totalmente com Gemini (Textos e Visão com Blindagem)", font=("Segoe UI", 10), bg=c["cabecalho"], fg="#94A3B8").pack()
-
-        # RODAPÉ
-        rodape = tk.Frame(self.root, bg="#0F172A", pady=10, padx=25)
-        rodape.pack(fill="x", side="bottom")
-        barra = tk.Frame(rodape, bg="#0F172A")
-        barra.pack(fill="x", pady=(0, 5))
-        self.status_var = tk.StringVar(value="🟢 A iniciar...")
-        tk.Label(barra, textvariable=self.status_var, font=("Segoe UI", 10, "bold"), bg="#0F172A", fg="#F8FAFC", anchor="w").pack(side="left", fill="x", expand=True)
-        self.progress_bar = ttk.Progressbar(barra, orient="horizontal", length=220, mode="determinate", maximum=100)
-        self.progress_bar.pack(side="right", padx=(10, 0))
-
-        # CONTAINER PRINCIPAL
-        self.main_wrap = tk.Frame(self.root, bg=c["bg"])
-        self.main_wrap.pack(fill="both", expand=True, padx=25, pady=20)
-
-        # CARD 1: ENTRADA
-        self.card_in = tk.Frame(self.main_wrap, bg=c["painel"], highlightthickness=1, highlightbackground=c["borda"], bd=0)
-        self.card_in.pack(fill="x", pady=(0, 20))
-
-        box_in_header = tk.Frame(self.card_in, bg=c["painel"])
-        box_in_header.pack(fill="x", padx=20, pady=(15, 10))
-        tk.Label(box_in_header, text="📝 Colar Lista (Texto ou Imagem)", font=("Segoe UI", 12, "bold"), bg=c["painel"], fg=c["texto"]).pack(side="left")
-
-        box_img_tools = tk.Frame(box_in_header, bg=c["painel"])
-        box_img_tools.pack(side="right")
-        estilo_btn_pq = dict(fg="white", font=("Segoe UI", 9, "bold"), bd=0, cursor="hand2", padx=10, pady=5)
+        config_salva = carregar_config_logos()
         
-        btn_ocr1 = tk.Button(box_img_tools, text="🖼️ Ler imagem com Gemini", command=self.ler_imagem_com_gemini, bg="#7C3AED", **estilo_btn_pq)
-        btn_ocr1.pack(side="left", padx=(0, 5))
-        btn_ocr2 = tk.Button(box_img_tools, text="📋 Colar imagem com Gemini", command=self.colar_imagem_com_gemini, bg="#7C3AED", **estilo_btn_pq)
-        btn_ocr2.pack(side="left", padx=(0, 5))
-        self.botoes_ia.extend([btn_ocr1, btn_ocr2])
-
-        self.text_area = scrolledtext.ScrolledText(self.card_in, height=6, font=("Segoe UI", 10), bd=1, relief="solid", bg=c["bg"], fg=c["texto"])
-        self.text_area.pack(fill="x", padx=20, pady=(0, 15))
-
-        box_actions = tk.Frame(self.card_in, bg=c["painel"])
-        box_actions.pack(fill="x", padx=20, pady=(0, 15))
-        box_actions.columnconfigure((0, 1, 2), weight=1, uniform="actions")
-        
-        estilo_btn_gr = dict(fg="white", font=("Segoe UI", 10, "bold"), bd=0, cursor="hand2", pady=8)
-        tk.Button(box_actions, text="✨ SEPARAR E ORGANIZAR (Ctrl+Enter)", command=self.processar_texto, bg="#2563EB", **estilo_btn_gr).grid(row=0, column=0, sticky="ew", padx=(0, 5))
-        btn_ia_principal = tk.Button(box_actions, text="🧠 ORGANIZAR COM GEMINI", command=self.processar_texto_com_gemini_thread, bg="#059669", **estilo_btn_gr)
-        btn_ia_principal.grid(row=0, column=1, sticky="ew", padx=5)
-        self.botoes_ia.append(btn_ia_principal)
-        tk.Button(box_actions, text="🗑️ Limpar tudo", command=self.limpar_tudo, bg="#64748B", **estilo_btn_gr).grid(row=0, column=2, sticky="ew", padx=(5, 0))
-
-        # CARD 2: RESULTADOS
-        self.card_out = tk.Frame(self.main_wrap, bg=c["painel"], highlightthickness=1, highlightbackground=c["borda"], bd=0)
-        self.card_out.pack(fill="both", expand=True)
-
-        box_out_header = tk.Frame(self.card_out, bg=c["painel"])
-        box_out_header.pack(fill="x", padx=20, pady=(15, 5))
-        tk.Label(box_out_header, text="🔍 Tabela de Pedidos", font=("Segoe UI", 12, "bold"), bg=c["painel"], fg=c["texto"]).pack(side="left")
-
-        box_filter = tk.Frame(box_out_header, bg=c["painel"])
-        box_filter.pack(side="right")
-        tk.Label(box_filter, text="Filtrar:", bg=c["painel"], fg=c["texto2"], font=("Segoe UI", 10)).pack(side="left", padx=5)
-        self.var_filtro = tk.StringVar()
-        self.var_filtro.trace_add("write", lambda *_: self._redesenhar_tabela())
-        self.entrada_filtro = tk.Entry(box_filter, textvariable=self.var_filtro, font=("Segoe UI", 10), width=30, bg=c["bg"], fg=c["texto"], relief="solid", bd=1)
-        self.entrada_filtro.pack(side="left")
-
-        self.lbl_resumo = tk.Label(self.card_out, text="Nenhum pedido gerado ainda.", bg=c["painel"], fg=c["texto2"], font=("Segoe UI", 9, "bold"))
-        self.lbl_resumo.pack(fill="x", padx=20, anchor="w", pady=(0, 10))
-
-        self.box_export = tk.Frame(self.card_out, bg=c["painel"])
-        self.box_export.pack(fill="x", padx=20, pady=(0, 20), side="bottom")
-        self.box_export.columnconfigure((0, 1, 2), weight=1, uniform="exports")
-        tk.Button(self.box_export, text="📋 COPIAR PARA EXCEL", command=self.copiar_para_excel, bg="#16A34A", **estilo_btn_gr).grid(row=0, column=0, sticky="ew", padx=(0, 5))
-        tk.Button(self.box_export, text="📊 SALVAR COMO EXCEL (.XLSX)", command=self.salvar_em_xlsx, bg="#0EA5E9", **estilo_btn_gr).grid(row=0, column=1, sticky="ew", padx=5)
-        tk.Button(self.box_export, text="💾 SALVAR FICHEIRO (.CSV)", command=self.salvar_em_csv, bg="#D97706", **estilo_btn_gr).grid(row=0, column=2, sticky="ew", padx=(5, 0))
-
-        frame_tabela = tk.Frame(self.card_out, bg=c["borda"], bd=0)
-        frame_tabela.pack(fill="both", expand=True, padx=20, pady=(0, 15))
-        
-        scroll_y = ttk.Scrollbar(frame_tabela)
-        scroll_y.pack(side="right", fill="y")
-        scroll_x = ttk.Scrollbar(frame_tabela, orient="horizontal")
-        scroll_x.pack(side="bottom", fill="x")
-        self.tree = ttk.Treeview(frame_tabela, columns=COLUNAS, show="headings", selectmode="extended", yscrollcommand=scroll_y.set, xscrollcommand=scroll_x.set)
-        for col in COLUNAS:
-            self.tree.heading(col, text=col, command=lambda c_=col: self.ordenar_por_coluna(c_))
-            self.tree.column(col, width=250, anchor="center")
-        self.tree.pack(fill="both", expand=True, padx=1, pady=1)
-        scroll_y.config(command=self.tree.yview)
-        scroll_x.config(command=self.tree.xview)
-        self.tree.bind("<Double-1>", self.editar_celula)
-        self.tree.bind("<Delete>", lambda _e: self.excluir_linhas_selecionadas())
-
-        self.frame_avisos = tk.Frame(self.card_out, bg=c["aviso_bg"], highlightthickness=1, highlightbackground=c["aviso_fg"], bd=0)
-        tk.Label(self.frame_avisos, text="⚠️ Linhas não reconhecidas (revise manualmente):", font=("Segoe UI", 9, "bold"), bg=c["aviso_bg"], fg=c["aviso_fg"]).pack(anchor="w", padx=10, pady=(10, 0))
-        self.txt_avisos = tk.Text(self.frame_avisos, height=3, font=("Segoe UI", 9), bd=0, bg=c["aviso_bg"], fg=c["aviso_txt"], wrap="word", state="disabled")
-        self.txt_avisos.pack(fill="both", expand=True, padx=10, pady=10)
-
-        self._aplicar_estilo_tabela(c)
-
-    def _aplicar_estilo_tabela(self, p: dict) -> None:
-        self.estilo.configure("Treeview.Heading", font=("Segoe UI", 10, "bold"), background=p["borda"], foreground=p["texto"], borderwidth=0, relief="flat")
-        self.estilo.map("Treeview.Heading", background=[("active", p["borda"])])
-        self.estilo.configure("Treeview", font=("Segoe UI", 10), rowheight=28, background=p["bg"], fieldbackground=p["bg"], foreground=p["texto"], borderwidth=0)
-        self.tree.tag_configure("dup_nome", background=p["dup_nome"])
-        self.tree.tag_configure("dup_num", background=p["dup_num"])
-
-    def _configurar_atalhos(self) -> None:
-        def so_fora_de_campos(acao):
-            def handler(_e):
-                if isinstance(self.root.focus_get(), (tk.Text, tk.Entry)): return None
-                acao()
-                return "break"
-            return handler
-        def ctrl_enter(_e):
-            self.processar_texto()
-            return "break"
-        self.text_area.bind("<Control-Return>", ctrl_enter)
-        self.root.bind("<Control-Return>", ctrl_enter)
-        self.root.bind("<Control-z>", so_fora_de_campos(self.desfazer))
-        self.root.bind("<Control-y>", so_fora_de_campos(self.refazer))
-        self.root.bind("<Control-f>", lambda _e: self.entrada_filtro.focus_set())
-        self.root.bind("<Control-s>", lambda _e: self.salvar_em_xlsx())
-        self.root.bind("<Control-o>", lambda _e: self.abrir_txt())
-        self.root.bind("<Control-C>", lambda _e: self.copiar_para_excel())
-        self.entrada_filtro.bind("<Escape>", lambda _e: self.var_filtro.set(""))
-
-    def _atualizar_titulo(self) -> None:
-        extra = f" — {os.path.basename(self.arquivo_atual)}" if self.arquivo_atual else ""
-        self.root.title(f"Organizador Inteligente de Pedidos{extra}")
-
-    def alternar_tema(self) -> None:
-        novo = PALETAS["escuro" if self.tema_escuro.get() else "claro"]
-        antigo = self._cores_atuais
-        mapa = {antigo[k].upper(): novo[k] for k in ("bg", "painel", "borda", "texto", "texto2", "cabecalho", "aviso_bg", "aviso_fg", "aviso_txt", "dup_nome", "dup_num")}
-        mapa[antigo["cabecalho"].upper()] = novo["cabecalho"]
-
-        def trocar(widget):
-            for opcao in ("bg", "fg", "insertbackground", "highlightbackground"):
-                try:
-                    atual = str(widget.cget(opcao)).upper()
-                    if atual in mapa: widget.configure(**{opcao: mapa[atual]})
-                except tk.TclError: pass
-            for filho in widget.winfo_children(): trocar(filho)
-
-        trocar(self.root)
-        self._aplicar_estilo_tabela(novo)
-        self._cores_atuais = novo
-        self.salvar_config()
-        self.set_status("Tema atualizado.")
-
-    def _salvar_estado_para_undo(self) -> None:
-        self.historico.append(copy.deepcopy(self.pedidos_atuais))
-        del self.historico[:-HISTORICO_MAXIMO]
-        self.futuro.clear()
-
-    def desfazer(self) -> None:
-        if not self.historico: return self.set_status("Nada para desfazer.")
-        self.futuro.append(copy.deepcopy(self.pedidos_atuais))
-        self.pedidos_atuais = self.historico.pop()
-        self._redesenhar_tabela()
-        self.set_status("Ação desfeita.")
-
-    def refazer(self) -> None:
-        if not self.futuro: return self.set_status("Nada para refazer.")
-        self.historico.append(copy.deepcopy(self.pedidos_atuais))
-        self.pedidos_atuais = self.futuro.pop()
-        self._redesenhar_tabela()
-        self.set_status("Ação refeita.")
-
-    def _texto_entrada(self) -> Optional[str]:
-        texto = self.text_area.get("1.0", tk.END).strip()
-        if not texto: messagebox.showwarning("Aviso", "A caixa de texto está vazia!", parent=self.root)
-        return texto or None
-
-    def _aplicar_resultado(self, pedidos: List[dict], nao_reconhecidas: List[str], origem: str) -> None:
-        self._salvar_estado_para_undo()
-        self.pedidos_atuais = pedidos
-        self.linhas_nao_reconhecidas = nao_reconhecidas
-        self._agrupar = True
-        self._redesenhar_tabela()
-        self._atualizar_avisos()
-        extra = f" {len(nao_reconhecidas)} linha(s) não reconhecida(s)." if nao_reconhecidas else ""
-        self.set_status(f"Sucesso! {len(pedidos)} pedido(s) organizado(s) ({origem}).{extra}", 100)
-
-    def processar_texto(self) -> None:
-        texto = self._texto_entrada()
-        if texto is None: return
-        self.set_status("A processar (modo local)...", 30)
-        pedidos, nao_reconhecidas = self.parser.processar(texto, self.preencher_padrao.get())
-        self._aplicar_resultado(pedidos, nao_reconhecidas, "modo local")
-
-    # ==========================================================================
-    # Organização de Texto com Gemini + Sistema Anticongestionamento (Retry)
-    # ==========================================================================
-    def processar_texto_com_gemini_thread(self) -> None:
-        texto = self._texto_entrada()
-        if texto is None or not self._checar_gemini(): return
-        if self._em_segundo_plano(self._processar_texto_com_gemini_exec, texto):
-            self.set_status("A IA (Gemini) está a organizar os dados...", 40)
-
-    def _prompt_ia(self, texto: str) -> str:
-        conversoes = ", ".join(f"{k} → {v}" for k, v in self.conversoes.items())
-        return (f"Você organiza listas de uniformes. Retorne um JSON estrito no formato: "
-                f'{{"pedidos": [{{"nome": "", "camisa": "", "numero": "", "calcao": ""}}]}}\n'
-                f"- Nomes em MAIÚSCULAS.\n"
-                f"- A palavra 'tradicional' significa camiseta normal (NÃO é baby look, não use o prefixo BL).\n"
-                f"- A expressão 'baby look' significa blusa baby look (use prefixo BL se necessário conforme conversões).\n"
-                f"- Tamanhos válidos: {', '.join(self.ordem_tamanhos)}.\n"
-                f"- Converta: {conversoes}.\n- Se tiver CONJUNTO, calção = camisa.\n"
-                f"Texto:\n{texto}")
-
-    def _normalizar_pedido_ia(self, nome, camisa, numero, calcao) -> dict:
-        limpo = lambda v: str(v or "").strip().upper()
-        pedido = ParserPedidos.novo_pedido(limpo(nome), self.parser.converter(limpo(camisa)), limpo(numero), self.parser.converter(limpo(calcao)))
-        if pedido["NOME"] == "SEM NOME": pedido["NOME"] = ""
-        if "SEM" in pedido["NÚMERO"]: pedido["NÚMERO"] = ""
-        if self.preencher_padrao.get():
-            for coluna, padrao in PREENCHIMENTO.items(): pedido[coluna] = pedido[coluna] or padrao
-        return pedido
-
-    def _interpretar_resposta_ia(self, resposta: str) -> List[dict]:
-        resposta = resposta.replace("```json", "").replace("```csv", "").replace("```", "").strip()
-        pedidos: List[dict] = []
-        try:
-            dados = json.loads(resposta)
-            itens = dados.get("pedidos", []) if isinstance(dados, dict) else dados
-            for it in itens if isinstance(itens, list) else []:
-                if isinstance(it, dict): pedidos.append(self._normalizar_pedido_ia(it.get("nome"), it.get("camisa"), it.get("numero"), it.get("calcao")))
-        except ValueError:
-            for linha in resposta.splitlines():
-                partes = [p.strip() for p in linha.split(";")]
-                if len(partes) >= 4 and partes[0].upper() != "NOME": pedidos.append(self._normalizar_pedido_ia(*partes[:4]))
-        return [p for p in pedidos if any(p[c] not in VALORES_VAZIOS for c in COLUNAS)]
-
-    def _processar_texto_com_gemini_exec(self, texto: str) -> None:
-        try:
-            def chamada():
-                return CLIENTE_GEMINI.models.generate_content(
-                    model='gemini-3.8-flash',
-                    contents=self._prompt_ia(texto),
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        temperature=0.0
-                    )
-                )
-            resposta = executar_com_retry_gemini(chamada)
-            conteudo = resposta.text.strip()
-            pedidos = self._interpretar_resposta_ia(conteudo)
-        except Exception as e:
-            self._na_interface(lambda erro=e: messagebox.showerror("Erro na API Gemini", f"Erro de comunicação com a IA:\n\n{erro}", parent=self.root))
-            self.set_status("Erro ao comunicar com a IA Gemini.", 0)
-            return
+        if config_salva.get("nahora") and os.path.exists(config_salva["nahora"]):
+            self.path_nahora.set(config_salva["nahora"])
+        if config_salva.get("carimbo_nahora") and os.path.exists(config_salva["carimbo_nahora"]):
+            self.path_carimbo_nahora.set(config_salva["carimbo_nahora"])
             
-        if not pedidos:
-            self.set_status("A IA não retornou dados válidos.", 0)
-            return
+        if config_salva.get("dakar") and os.path.exists(config_salva["dakar"]):
+            self.path_dakar.set(config_salva["dakar"])
+        if config_salva.get("carimbo_dakar") and os.path.exists(config_salva["carimbo_dakar"]):
+            self.path_carimbo_dakar.set(config_salva["carimbo_dakar"])
             
-        pedidos.sort(key=self.parser.peso)
-        self._na_interface(self._aplicar_resultado, pedidos, [], "IA Gemini")
-
-    # ==========================================================================
-    # Leitura de Imagens com Gemini (Visão com Blindagem)
-    # ==========================================================================
-    def ler_imagem_com_gemini(self) -> None:
-        if not self._checar_gemini(): return
-        caminho = filedialog.askopenfilename(filetypes=[("Imagens", "*.png *.jpg *.jpeg *.bmp *.webp")])
-        if caminho: self._em_segundo_plano(self._visao_gemini_exec, caminho)
-
-    def colar_imagem_com_gemini(self) -> None:
-        if not self._checar_gemini(): return
-        imagem = self._imagem_da_area_transferencia()
-        if imagem is None: return
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-            imagem.convert("RGB").save(tmp, "PNG")
-        self._em_segundo_plano(self._visao_gemini_exec, tmp.name, True)
-
-    def _imagem_da_area_transferencia(self):
-        if not PIL_DISPONIVEL:
-            messagebox.showerror("Erro", "Biblioteca Pillow em falta: pip install pillow", parent=self.root)
-            return None
-        try: conteudo = ImageGrab.grabclipboard()
-        except Exception: conteudo = None
-        if isinstance(conteudo, list):
-            caminhos = [c for c in conteudo if c.lower().endswith((".png", ".jpg", ".jpeg", ".bmp", ".webp"))]
-            conteudo = Image.open(caminhos[0]) if caminhos else None
-        if conteudo is None: messagebox.showinfo("Aviso", "Não há nenhuma imagem copiada no clipboard.", parent=self.root)
-        return conteudo
-
-    def _visao_gemini_exec(self, caminho: str, apagar_depois: bool = False) -> None:
-        prompt = (
-            "Esta imagem contém uma lista manuscrita de pedidos de uniformes desportivos. "
-            "Transcreva EXATAMENTE linha por linha todo o texto visível e manuscrito com máxima precisão. "
-            "Não adicione introduções, comentários nem saudações, apenas a transcrição limpa."
-        )
-        try:
-            self.set_status("A ler a imagem com o Gemini (Visão com Blindagem)...", 50)
-            img = Image.open(caminho)
+        lider_com_path = config_salva.get("lider_comercio") or config_salva.get("lider")
+        if lider_com_path and os.path.exists(lider_com_path):
+            self.path_lider_comercio.set(lider_com_path)
+        if config_salva.get("carimbo_lider_comercio") and os.path.exists(config_salva["carimbo_lider_comercio"]):
+            self.path_carimbo_lider_comercio.set(config_salva["carimbo_lider_comercio"])
             
-            def chamada():
-                return CLIENTE_GEMINI.models.generate_content(
-                    model='gemini-3.8-flash',
-                    contents=[prompt, img]
-                )
+        if config_salva.get("lider_sport") and os.path.exists(config_salva["lider_sport"]):
+            self.path_lider_sport.set(config_salva["lider_sport"])
+        if config_salva.get("carimbo_lider_sport") and os.path.exists(config_salva["carimbo_lider_sport"]):
+            self.path_carimbo_lider_sport.set(config_salva["carimbo_lider_sport"])
 
-            resposta = executar_com_retry_gemini(chamada)
-            texto = resposta.text.strip()
-        except Exception as e:
-            self._na_interface(lambda erro=e: messagebox.showerror("Erro Gemini Visão", f"Erro:\n\n{erro}", parent=self.root))
-            self.set_status("Erro ao ler imagem com o Gemini.", 0)
-            return
-        finally:
-            if apagar_depois:
-                try: os.remove(caminho)
-                except OSError: pass
-                
-        if not texto: return
-        self.set_status("Leitura da imagem concluída.", 100)
-        self._na_interface(self._mostrar_janela_revisao_ocr, texto)
+        itens_config = [
+            ("Logo Na Hora:", self.path_nahora),
+            ("Carimbo Na Hora:", self.path_carimbo_nahora),
+            ("Logo Dakar Sport:", self.path_dakar),
+            ("Carimbo Dakar Sport:", self.path_carimbo_dakar),
+            ("Logo Líder Comércio:", self.path_lider_comercio),
+            ("Carimbo Líder Comércio:", self.path_carimbo_lider_comercio),
+            ("Logo Lider Sport:", self.path_lider_sport),
+            ("Carimbo Lider Sport:", self.path_carimbo_lider_sport)
+        ]
 
-    # ---------------------------------------------------------------- tabela e ficheiros
-    def ordenar_por_coluna(self, coluna: str) -> None:
-        pos = self.parser.posicao
-        chaves = {
-            "NOME": lambda p: p["NOME"],
-            "TAMANHO DE CAMISA": lambda p: pos.get(p["TAMANHO DE CAMISA"], 999),
-            "NÚMERO": lambda p: int(p["NÚMERO"]) if str(p["NÚMERO"]).isdigit() else (0 if p["NÚMERO"] in ("PI", "π") else 9999),
-            "TAMANHO DE CALÇÃO": lambda p: pos.get(p["TAMANHO DE CALÇÃO"], 999),
+        for i, (label_text, string_var) in enumerate(itens_config):
+            ttk.Label(self.frame_logos, text=label_text, style="Header.TLabel").grid(row=i, column=0, sticky="w", padx=5, pady=2)
+            ttk.Entry(self.frame_logos, textvariable=string_var, width=65).grid(row=i, column=1, padx=5, pady=2)
+            tk.Button(
+                self.frame_logos, text="Procurar...", command=lambda v=string_var: self._escolher_imagem(v),
+                bg="#eaeded", font=("Segoe UI", 9), relief="raised", cursor="hand2"
+            ).grid(row=i, column=2, padx=5, pady=2)
+
+    def _salvar_estado_logos(self) -> None:
+        estado = {
+            "nahora": self.path_nahora.get().strip(),
+            "carimbo_nahora": self.path_carimbo_nahora.get().strip(),
+            "dakar": self.path_dakar.get().strip(),
+            "carimbo_dakar": self.path_carimbo_dakar.get().strip(),
+            "lider_comercio": self.path_lider_comercio.get().strip(),
+            "carimbo_lider_comercio": self.path_carimbo_lider_comercio.get().strip(),
+            "lider_sport": self.path_lider_sport.get().strip(),
+            "carimbo_lider_sport": self.path_carimbo_lider_sport.get().strip()
         }
-        rev = self._ordenacao_reversa.get(coluna, False)
-        self._salvar_estado_para_undo()
-        self.pedidos_atuais.sort(key=chaves[coluna], reverse=rev)
-        self._ordenacao_reversa[coluna] = not rev
-        self._agrupar = coluna in COLUNAS_TAMANHO and not rev
-        self._redesenhar_tabela()
+        salvar_config_logos(estado)
 
-    def _redesenhar_tabela(self) -> None:
-        self.tree.delete(*self.tree.get_children())
-        filtro = self.var_filtro.get().strip().upper()
-        agrupar = self._agrupar and not filtro
-        nomes = Counter(p["NOME"].strip() for p in self.pedidos_atuais if p["NOME"].strip() not in VALORES_VAZIOS)
-        numeros = Counter(p["NÚMERO"].strip() for p in self.pedidos_atuais if p["NÚMERO"].strip() not in VALORES_VAZIOS)
+    def _escolher_imagem(self, string_var: tk.StringVar) -> None:
+        arquivo = filedialog.askopenfilename(
+            title="Selecione a Imagem",
+            filetypes=[("Arquivos de Imagem", "*.png *.jpg *.jpeg"), ("Todos os Arquivos", "*.*")]
+        )
+        if arquivo:
+            string_var.set(arquivo)
+            self._salvar_estado_logos()
 
-        self._linhas_visiveis = []
-        grupo_atual = None
-        for idx, p in enumerate(self.pedidos_atuais):
-            if filtro and filtro not in " ".join(p.values()).upper(): continue
-            if agrupar:
-                grupo = p["TAMANHO DE CAMISA"] if p["TAMANHO DE CAMISA"] in self.parser.posicao else p["TAMANHO DE CALÇÃO"]
-                if grupo_atual is not None and grupo != grupo_atual:
-                    self.tree.insert("", tk.END, values=("", "", "", ""))
-                    self._linhas_visiveis.append(None)
-                grupo_atual = grupo
-            tag = "dup_nome" if nomes.get(p["NOME"].strip(), 0) > 1 else "dup_num" if numeros.get(p["NÚMERO"].strip(), 0) > 1 else ""
-            self.tree.insert("", tk.END, iid=str(idx), values=[p[c] for c in COLUNAS], tags=(tag,))
-            self._linhas_visiveis.append(p)
-        self._atualizar_resumo(nomes, numeros)
+    def _montar_frame_meta(self, main_frame: ttk.Frame) -> None:
+        self.frame_meta = ttk.LabelFrame(main_frame, text=" Informações do Cabeçalho ", padding=12)
+        self.frame_meta.pack(fill="x", pady=5)
 
-    def _atualizar_resumo(self, nomes: Counter, numeros: Counter) -> None:
-        tot = len(self.pedidos_atuais)
-        if not tot: return self.lbl_resumo.config(text="Nenhum pedido gerado ainda.")
-        pos = self.parser.posicao
-        camisas = Counter(p["TAMANHO DE CAMISA"] for p in self.pedidos_atuais if p["TAMANHO DE CAMISA"] not in VALORES_VAZIOS)
-        resumo = "  ".join(f"{t}: {q}" for t, q in sorted(camisas.items(), key=lambda kv: pos.get(kv[0], 999)))
-        alts = [a for a, c in zip(["🟥 nomes rep.", "🟨 num rep."], [sum(1 for q in nomes.values() if q > 1), sum(1 for q in numeros.values() if q > 1)]) if c]
-        self.lbl_resumo.config(text=f"Total: {tot}  |  {resumo}" + ("  |  " + ", ".join(alts) if alts else ""))
+        ttk.Label(self.frame_meta, text="Cidade:", style="Header.TLabel").grid(row=0, column=0, sticky="w", padx=5, pady=6)
+        self.ent_cidade = ttk.Entry(self.frame_meta, width=22)
+        self.ent_cidade.grid(row=0, column=1, sticky="w", padx=5, pady=6)
+        self.ent_cidade.insert(0, "GOIÂNIA")
 
-    def _atualizar_avisos(self) -> None:
-        if self.linhas_nao_reconhecidas:
-            self.frame_avisos.pack(fill="x", padx=20, pady=(0, 20), side="bottom", before=self.box_export)
-            self.txt_avisos.config(state="normal")
-            self.txt_avisos.delete("1.0", tk.END)
-            self.txt_avisos.insert(tk.END, "\n".join(f"• {l}" for l in self.linhas_nao_reconhecidas))
-            self.txt_avisos.config(state="disabled")
-        else:
-            self.frame_avisos.pack_forget()
+        ttk.Label(self.frame_meta, text="Data (DD/MM/AAAA):", style="Header.TLabel").grid(row=0, column=2, sticky="w", padx=5, pady=6)
+        self.ent_data = ttk.Entry(self.frame_meta, width=22)
+        self.ent_data.grid(row=0, column=3, sticky="w", padx=5, pady=6)
+        self.ent_data.insert(0, "10/06/2026")
 
-    def editar_celula(self, event) -> None:
-        if self.tree.identify_region(event.x, event.y) != "cell": return
-        item_id = self.tree.identify_row(event.y)
-        coluna_id = self.tree.identify_column(event.x)
-        if not item_id.isdigit(): return
-        bbox = self.tree.bbox(item_id, coluna_id)
-        if not bbox: return
-        coluna = COLUNAS[int(coluna_id[1:]) - 1]
-        idx = int(item_id)
+        ttk.Label(self.frame_meta, text="Aos Cuidados de (A/C):", style="Header.TLabel").grid(row=1, column=0, sticky="w", padx=5, pady=6)
+        self.ent_ac = ttk.Entry(self.frame_meta, width=50)
+        self.ent_ac.grid(row=1, column=1, columnspan=3, sticky="w", padx=5, pady=6)
+        self.ent_ac.insert(0, "PREFEITURA MUNICIPAL DE ALVORADA")
 
-        entry = tk.Entry(self.tree, font=("Segoe UI", 10), justify="center")
-        entry.insert(0, self.pedidos_atuais[idx][coluna])
-        entry.select_range(0, tk.END)
-        entry.focus_set()
-        entry.place(x=bbox[0], y=bbox[1], width=bbox[2], height=bbox[3])
-        concluido = False
+        ttk.Label(self.frame_meta, text="Empresa Menor Preço:", style="Header.TLabel", foreground="#0b5345").grid(row=2, column=0, sticky="w", padx=5, pady=6)
+        self.var_menor_preco = tk.StringVar(value="Na Hora")
+        empresas = ["Na Hora", "Dakar Sport", "Líder Comércio", "Lider Sport"]
+        ttk.OptionMenu(self.frame_meta, self.var_menor_preco, empresas[0], *empresas).grid(row=2, column=1, sticky="w", padx=5, pady=6)
 
-        def salvar(_e=None):
-            nonlocal concluido
-            if concluido: return
-            concluido, valor = True, entry.get().strip().upper()
-            entry.destroy()
-            if coluna in COLUNAS_TAMANHO: valor = self.parser.conversoes.get(valor, valor)
-            if valor == self.pedidos_atuais[idx][coluna]: return
-            self._salvar_estado_para_undo()
-            self.pedidos_atuais[idx][coluna] = valor
-            self._redesenhar_tabela()
+        ttk.Label(self.frame_meta, text="Formato de Saída:", style="Header.TLabel", foreground="#7d6608").grid(row=2, column=2, sticky="w", padx=5, pady=6)
+        self.var_formato = tk.StringVar(value="JPG")
+        ttk.OptionMenu(self.frame_meta, self.var_formato, "JPG", "JPG", "PDF", "PNG").grid(row=2, column=3, sticky="w", padx=5, pady=6)
 
-        def cancelar(_e=None):
-            nonlocal concluido
-            concluido = True
-            entry.destroy()
+        ttk.Label(self.frame_meta, text="Condição Pagamento:", style="Header.TLabel").grid(row=3, column=0, sticky="w", padx=5, pady=6)
+        self.var_pagamento = tk.StringVar(value="50% do valor de entrada e 50% na retirada")
+        ttk.Combobox(
+            self.frame_meta, textvariable=self.var_pagamento, width=48,
+            values=["50% do valor de entrada e 50% na retirada", "À Vista", "Boleto Bancário"],
+        ).grid(row=3, column=1, columnspan=3, sticky="w", padx=5, pady=6)
 
-        entry.bind("<Return>", salvar)
-        entry.bind("<FocusOut>", salvar)
-        entry.bind("<Escape>", cancelar)
+        ttk.Label(self.frame_meta, text="Prazo de Entrega:", style="Header.TLabel").grid(row=4, column=0, sticky="w", padx=5, pady=6)
+        self.ent_prazo = ttk.Entry(self.frame_meta, width=22)
+        self.ent_prazo.grid(row=4, column=1, sticky="w", padx=5, pady=6)
+        self.ent_prazo.insert(0, "15 - 20 DIAS")
 
-    def adicionar_linha_manual(self) -> None:
-        self._salvar_estado_para_undo()
-        self.pedidos_atuais.append(ParserPedidos.novo_pedido())
-        self._agrupar = False
-        self.var_filtro.set("")
-        self._redesenhar_tabela()
-        self.tree.see(str(len(self.pedidos_atuais) - 1))
+        ttk.Label(self.frame_meta, text="Validade Orçamento:", style="Header.TLabel").grid(row=4, column=2, sticky="w", padx=5, pady=6)
+        self.ent_validade = ttk.Entry(self.frame_meta, width=22)
+        self.ent_validade.grid(row=4, column=3, sticky="w", padx=5, pady=6)
+        self.ent_validade.insert(0, "30 DIAS")
 
-    def excluir_linhas_selecionadas(self) -> None:
-        indices = sorted((int(i) for i in self.tree.selection() if i.isdigit()), reverse=True)
-        if not indices: return
-        self._salvar_estado_para_undo()
-        for idx in indices: del self.pedidos_atuais[idx]
-        self._redesenhar_tabela()
+        ttk.Label(self.frame_meta, text="Salvar na Pasta:", style="Header.TLabel", foreground="#117a65").grid(row=5, column=0, sticky="w", padx=5, pady=6)
+        self.ent_pasta = ttk.Entry(self.frame_meta, width=40)
+        self.ent_pasta.grid(row=5, column=1, columnspan=2, sticky="w", padx=5, pady=6)
+        self.ent_pasta.insert(0, PASTA_PADRAO_ORCAMENTOS)
 
-    def limpar_tudo(self) -> None:
-        if not messagebox.askyesno("Limpar", "Pretende limpar o texto e a tabela?", parent=self.root): return
-        self._salvar_estado_para_undo()
-        self.text_area.delete("1.0", tk.END)
-        self.pedidos_atuais, self.linhas_nao_reconhecidas = [], []
-        self.var_filtro.set("")
-        self._redesenhar_tabela()
-        self._atualizar_avisos()
+        tk.Button(
+            self.frame_meta, text="Procurar...", command=self.escolher_pasta, bg="#eaeded",
+            font=("Segoe UI", 9), relief="raised", cursor="hand2",
+        ).grid(row=5, column=3, sticky="w", padx=5, pady=6)
 
-    def abrir_txt(self) -> None:
-        caminho = filedialog.askopenfilename(filetypes=[("Texto", "*.txt"), ("Todos", "*.*")])
-        if not caminho: return
-        for codificacao in ("utf-8-sig", "cp1252"):
+        ttk.Label(self.frame_meta, text="Modo de Geração:", style="Header.TLabel", foreground="#8e44ad").grid(row=6, column=0, sticky="w", padx=5, pady=6)
+        self.var_modo_geracao = tk.StringVar(value="Gerar 3 (1 Vencedor + 2 Aleatórios)")
+        ttk.OptionMenu(
+            self.frame_meta, self.var_modo_geracao, "Gerar 3 (1 Vencedor + 2 Aleatórios)", 
+            "Gerar 3 (1 Vencedor + 2 Aleatórios)", "Apenas Menor Preço"
+        ).grid(row=6, column=1, sticky="w", padx=5, pady=6)
+
+        self.var_abrir_auto = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            self.frame_meta, text="Abrir arquivos automaticamente após gerar", variable=self.var_abrir_auto
+        ).grid(row=6, column=2, columnspan=2, sticky="w", padx=5, pady=6)
+
+    def _montar_frame_tabela(self, main_frame: ttk.Frame) -> None:
+        self.frame_tabela = ttk.LabelFrame(main_frame, text=" Itens do Orçamento ", padding=12)
+        self.frame_tabela.pack(fill="x", pady=5)
+
+        for i, h in enumerate(["Nº", "Descrição", "UND", "QTD", "Valor Unit.", "Valor Total"]):
+            ttk.Label(self.frame_tabela, text=h, font=("Segoe UI", 10, "bold")).grid(row=0, column=i, padx=5, pady=5)
+
+        self.lbl_texto_total = ttk.Label(self.frame_tabela, text="TOTAL GERAL BASE:", font=("Segoe UI", 10, "bold"))
+        self.lbl_total_geral = ttk.Label(self.frame_tabela, text="R$ 0,00", font=("Segoe UI", 10, "bold"), foreground="#1b4f72")
+
+    def _montar_botoes(self, main_frame: ttk.Frame) -> None:
+        frame_botoes = ttk.Frame(main_frame)
+        frame_botoes.pack(pady=15)
+
+        tk.Button(
+            frame_botoes, text="+ Adicionar Nova Linha", command=self.adicionar_linha,
+            bg="#d4edda", fg="#155724", font=("Segoe UI", 10, "bold"), relief="raised", bd=2, padx=12, pady=6, cursor="hand2"
+        ).grid(row=0, column=0, padx=10, pady=5)
+
+        tk.Button(
+            frame_botoes, text="- Remover Última Linha", command=self.remover_ultima_linha,
+            bg="#f8d7da", fg="#721c24", font=("Segoe UI", 10, "bold"), relief="raised", bd=2, padx=12, pady=6, cursor="hand2"
+        ).grid(row=0, column=1, padx=10, pady=5)
+
+        tk.Button(
+            frame_botoes, text="📂 Carregar Projeto", command=self.carregar_projeto,
+            bg="#cce5ff", fg="#004085", font=("Segoe UI", 10, "bold"), relief="raised", bd=2, padx=12, pady=6, cursor="hand2"
+        ).grid(row=1, column=0, padx=10, pady=5)
+
+        tk.Button(
+            frame_botoes, text="💾 Salvar Projeto", command=self.salvar_projeto,
+            bg="#fff3cd", fg="#856404", font=("Segoe UI", 10, "bold"), relief="raised", bd=2, padx=12, pady=6, cursor="hand2"
+        ).grid(row=1, column=1, padx=10, pady=5)
+
+        tk.Button(
+            frame_botoes, text="🚀 Gerar Orçamentos", command=self.gerar_orcamentos,
+            bg="#d1ecf1", fg="#0c5460", font=("Segoe UI", 10, "bold"), relief="raised", bd=2, padx=18, pady=6, cursor="hand2"
+        ).grid(row=0, column=2, rowspan=2, padx=15, pady=5, sticky="ns")
+
+    def _montar_rodape(self, main_frame: ttk.Frame) -> None:
+        footer_frame = ttk.Frame(main_frame)
+        footer_frame.pack(side="bottom", fill="x", pady=5)
+        ttk.Label(
+            footer_frame, text="Programa Desenvolvido por: Douglas Oliveira  |  email: getyourwish10@gmail.com",
+            font=("Segoe UI", 9, "italic"), foreground="#555555"
+        ).pack(anchor="center")
+
+    def salvar_projeto(self):
+        dados = {
+            "cabecalho": {
+                "cidade": self.ent_cidade.get(),
+                "data": self.ent_data.get(),
+                "ac": self.ent_ac.get(),
+                "menor_preco": self.var_menor_preco.get(),
+                "formato": self.var_formato.get(),
+                "condicao": self.var_pagamento.get(),
+                "prazo": self.ent_prazo.get(),
+                "validade": self.ent_validade.get(),
+                "pasta": self.ent_pasta.get(),
+                "modo_geracao": self.var_modo_geracao.get(),
+                "abrir_auto": self.var_abrir_auto.get()
+            },
+            "itens": []
+        }
+        
+        for linha in self.linhas:
+            dados["itens"].append({
+                "item": linha["item"].get(),
+                "desc": linha["desc"].get(),
+                "unid": linha["unid"].get(),
+                "qtd": linha["qtd"].get(),
+                "vlr": linha["vlr"].get()
+            })
+
+        pasta_padrao = self.ent_pasta.get().strip() or PASTA_PADRAO_ORCAMENTOS
+        os.makedirs(pasta_padrao, exist_ok=True)
+        nome_sugerido = limpar_nome_arquivo(self.ent_ac.get()) or "Projeto_Orcamento"
+        
+        caminho = filedialog.asksaveasfilename(
+            initialdir=pasta_padrao,
+            initialfile=nome_sugerido,
+            defaultextension=".json",
+            filetypes=[("Arquivo de Projeto JSON", "*.json"), ("Todos Arquivos", "*.*")],
+            title="Salvar Projeto"
+        )
+        
+        if caminho:
             try:
-                with open(caminho, encoding=codificacao) as f: conteudo = f.read()
-                break
-            except UnicodeDecodeError: continue
-        self.text_area.delete("1.0", tk.END)
-        self.text_area.insert(tk.END, conteudo)
+                with open(caminho, 'w', encoding='utf-8') as f:
+                    json.dump(dados, f, ensure_ascii=False, indent=4)
+                messagebox.showinfo("Sucesso", "Projeto salvo com sucesso!")
+            except Exception as e:
+                messagebox.showerror("Erro", f"Falha ao salvar:\n{e}")
 
-    def colar_da_area_transferencia(self) -> None:
-        try: self.text_area.insert(tk.INSERT, self.root.clipboard_get())
-        except tk.TclError: pass
+    def carregar_projeto(self):
+        pasta_padrao = self.ent_pasta.get().strip() or PASTA_PADRAO_ORCAMENTOS
+        caminho = filedialog.askopenfilename(
+            initialdir=pasta_padrao,
+            filetypes=[("Arquivo de Projeto JSON", "*.json"), ("Todos Arquivos", "*.*")],
+            title="Carregar Projeto"
+        )
+        
+        if not caminho:
+            return
 
-    def _linhas_para_exportar(self) -> List[List[str]]:
-        return [[p[c] for c in COLUNAS] if p else ["", "", "", ""] for p in self._linhas_visiveis]
-
-    def _nome_sugerido(self, extensao: str) -> str:
-        base = os.path.splitext(os.path.basename(self.arquivo_atual))[0] if self.arquivo_atual else "pedidos"
-        return f"{base}_{datetime.now():%Y-%m-%d}{extensao}"
-
-    def copiar_para_excel(self) -> None:
-        if not self._linhas_visiveis: return
-        self.root.clipboard_clear()
-        self.root.clipboard_append("\n".join("\t".join(l) for l in self._linhas_para_exportar()))
-        self.set_status("✅ Copiado!", 100)
-
-    def salvar_em_csv(self) -> None:
-        if not self._linhas_visiveis: return
-        caminho = filedialog.asksaveasfilename(defaultextension=".csv", initialfile=self._nome_sugerido(".csv"), filetypes=[("CSV", "*.csv")])
-        if not caminho: return
         try:
-            with open(caminho, "w", newline="", encoding="utf-8-sig") as f:
-                w = csv.writer(f, delimiter=";")
-                w.writerow(COLUNAS)
-                w.writerows(self._linhas_para_exportar())
-        except OSError as e: messagebox.showerror("Erro", str(e), parent=self.root)
+            with open(caminho, 'r', encoding='utf-8') as f:
+                dados = json.load(f)
 
-    def salvar_em_xlsx(self) -> None:
-        if not OPENPYXL_DISPONIVEL: return messagebox.showerror("Erro", "pip install openpyxl", parent=self.root)
-        if not self._linhas_visiveis: return
-        caminho = filedialog.asksaveasfilename(defaultextension=".xlsx", initialfile=self._nome_sugerido(".xlsx"), filetypes=[("Excel", "*.xlsx")])
-        if not caminho: return
+            cab = dados.get("cabecalho", {})
+            self.ent_cidade.delete(0, tk.END); self.ent_cidade.insert(0, cab.get("cidade", ""))
+            self.ent_data.delete(0, tk.END); self.ent_data.insert(0, cab.get("data", ""))
+            self.ent_ac.delete(0, tk.END); self.ent_ac.insert(0, cab.get("ac", ""))
+            
+            menor_pr_salvo = cab.get("menor_preco", "Na Hora")
+            if menor_pr_salvo == "Líder Comércio": self.var_menor_preco.set("Líder Comércio")
+            else: self.var_menor_preco.set(menor_pr_salvo)
+            
+            self.var_formato.set(cab.get("formato", "JPG"))
+            self.var_pagamento.set(cab.get("condicao", ""))
+            self.ent_prazo.delete(0, tk.END); self.ent_prazo.insert(0, cab.get("prazo", ""))
+            self.ent_validade.delete(0, tk.END); self.ent_validade.insert(0, cab.get("validade", ""))
+            self.ent_pasta.delete(0, tk.END); self.ent_pasta.insert(0, cab.get("pasta", ""))
+            self.var_modo_geracao.set(cab.get("modo_geracao", "Gerar 3 (1 Vencedor + 2 Aleatórios)"))
+            self.var_abrir_auto.set(cab.get("abrir_auto", True))
+
+            for linha in self.linhas:
+                for chave in ("item", "desc", "unid", "ent_qtd", "ent_vlr", "lbl_total"):
+                    linha[chave].destroy()
+            self.linhas.clear()
+
+            itens = dados.get("itens", [])
+            if not itens:
+                self.adicionar_linha()
+            else:
+                for d_item in itens:
+                    self.adicionar_linha()
+                    linha_atual = self.linhas[-1]
+                    linha_atual["item"].delete(0, tk.END); linha_atual["item"].insert(0, d_item.get("item", ""))
+                    linha_atual["desc"].delete(0, tk.END); linha_atual["desc"].insert(0, d_item.get("desc", ""))
+                    linha_atual["unid"].delete(0, tk.END); linha_atual["unid"].insert(0, d_item.get("unid", ""))
+                    linha_atual["qtd"].set(d_item.get("qtd", "1"))
+                    linha_atual["vlr"].set(d_item.get("vlr", "0,00"))
+
+            self.atualizar_totais()
+            messagebox.showinfo("Projeto Carregado", "Orçamento recuperado com sucesso!")
+        except Exception as e:
+            messagebox.showerror("Erro ao Carregar", f"Falha no arquivo:\n{e}")
+
+    def escolher_pasta(self) -> None:
+        pasta_atual = self.ent_pasta.get()
+        initialdir = pasta_atual if os.path.isdir(pasta_atual) else os.path.expanduser("~")
+        pasta_selecionada = filedialog.askdirectory(initialdir=initialdir)
+        if pasta_selecionada:
+            self.ent_pasta.delete(0, tk.END)
+            self.ent_pasta.insert(0, pasta_selecionada)
+
+    def atualizar_totais(self, *_args) -> None:
+        total_geral = 0.0
+        for linha in self.linhas:
+            qtd = limpar_numero(linha["qtd"].get())
+            vlr = limpar_numero(linha["vlr"].get())
+            total_linha = qtd * vlr
+            linha["lbl_total"].config(text=f"R$ {formatar_valor(total_linha)}")
+            total_geral += total_linha
+        self.lbl_total_geral.config(text=f"R$ {formatar_valor(total_geral)}")
+
+    def _reposicionar_rodape_tabela(self) -> None:
+        linha_rodape = len(self.linhas) + 1
+        self.lbl_texto_total.grid(row=linha_rodape, column=4, sticky="e", padx=5, pady=15)
+        self.lbl_total_geral.grid(row=linha_rodape, column=5, sticky="e", padx=5, pady=15)
+
+    def adicionar_linha(self) -> None:
+        row_idx = len(self.linhas) + 1
+
+        ent_item = ttk.Entry(self.frame_tabela, width=5, justify="center")
+        ent_item.grid(row=row_idx, column=0, padx=5, pady=5)
+        ent_item.insert(0, str(len(self.linhas) + 1))
+
+        ent_desc = ttk.Entry(self.frame_tabela, width=35)
+        ent_desc.grid(row=row_idx, column=1, padx=5, pady=5)
+
+        ent_unid = ttk.Entry(self.frame_tabela, width=8, justify="center")
+        ent_unid.grid(row=row_idx, column=2, padx=5, pady=5)
+        ent_unid.insert(0, "UND")
+
+        var_qtd = tk.StringVar(value="1")
+        ent_qtd = ttk.Entry(self.frame_tabela, textvariable=var_qtd, width=10, justify="center")
+        ent_qtd.grid(row=row_idx, column=3, padx=5, pady=5)
+
+        var_vlr = tk.StringVar(value="0,00")
+        ent_vlr = ttk.Entry(self.frame_tabela, textvariable=var_vlr, width=12, justify="right")
+        ent_vlr.grid(row=row_idx, column=4, padx=5, pady=5)
+
+        lbl_total = ttk.Label(self.frame_tabela, text="R$ 0,00", width=15, anchor="e")
+        lbl_total.grid(row=row_idx, column=5, padx=5, pady=5)
+
+        var_qtd.trace_add("write", self.atualizar_totais)
+        var_vlr.trace_add("write", self.atualizar_totais)
+
+        self.linhas.append({
+            "item": ent_item, "desc": ent_desc, "unid": ent_unid,
+            "ent_qtd": ent_qtd, "ent_vlr": ent_vlr,
+            "qtd": var_qtd, "vlr": var_vlr, "lbl_total": lbl_total,
+        })
+
+        self._reposicionar_rodape_tabela()
+        self.atualizar_totais()
+        self.root.update_idletasks()
+        self.canvas.yview_moveto(1.0)
+
+    def remover_ultima_linha(self) -> None:
+        if len(self.linhas) <= 1:
+            messagebox.showinfo("Aviso", "É necessário manter ao menos um item na tabela.")
+            return
+        linha = self.linhas.pop()
+        for chave in ("item", "desc", "unid", "ent_qtd", "ent_vlr", "lbl_total"):
+            linha[chave].destroy()
+        self._reposicionar_rodape_tabela()
+        self.atualizar_totais()
+
+    def _coletar_dados(self) -> Tuple[DadosCabecalho, List[ItemOrcamento], LogosEmpresas]:
+        cidade = self.ent_cidade.get().strip().upper()
+        data = self.ent_data.get().strip()
+        ac = self.ent_ac.get().strip().upper()
+        condicao = self.var_pagamento.get().strip().upper()
+        prazo = self.ent_prazo.get().strip().upper()
+        validade = self.ent_validade.get().strip().upper()
+        pasta = self.ent_pasta.get().strip() or PASTA_PADRAO_ORCAMENTOS
+
+        if not cidade:
+            raise ValueError("Informe a cidade.")
+        if not re.match(r"^\d{2}/\d{2}/\d{4}$", data):
+            raise ValueError("Data inválida. Use o formato DD/MM/AAAA.")
+        if not ac:
+            raise ValueError("Informe o destinatário (A/C).")
+
+        self._salvar_estado_logos()
+
+        cabecalho = DadosCabecalho(cidade, data, ac, condicao, prazo, validade, pasta)
+
+        logos = LogosEmpresas(
+            nahora=self.path_nahora.get().strip(),
+            dakar=self.path_dakar.get().strip(),
+            lider_comercio=self.path_lider_comercio.get().strip(),
+            lider_sport=self.path_lider_sport.get().strip(),
+            carimbo_nahora=self.path_carimbo_nahora.get().strip(),
+            carimbo_dakar=self.path_carimbo_dakar.get().strip(),
+            carimbo_lider_comercio=self.path_carimbo_lider_comercio.get().strip(),
+            carimbo_lider_sport=self.path_carimbo_lider_sport.get().strip()
+        )
+
+        itens: List[ItemOrcamento] = []
+        for linha in self.linhas:
+            descricao = linha["desc"].get().strip()
+            if not descricao:
+                continue
+            itens.append(ItemOrcamento(
+                numero=linha["item"].get().strip() or str(len(itens) + 1),
+                descricao=descricao,
+                unidade=linha["unid"].get().strip() or "UND",
+                quantidade=limpar_numero(linha["qtd"].get()),
+                valor_unitario=limpar_numero(linha["vlr"].get()),
+            ))
+
+        if not itens:
+            raise ValueError("Adicione ao menos um item com descrição válida.")
+
+        return cabecalho, itens, logos
+
+    def gerar_orcamentos(self) -> None:
         try:
-            wb = openpyxl.Workbook()
-            ws = wb.active
-            ws.title = "Pedidos"
-            ws.append(list(COLUNAS))
-            for l in self._linhas_para_exportar(): ws.append(l)
-            for c in ws[1]: c.font, c.fill = Font(bold=True, color="FFFFFF"), PatternFill("solid", fgColor="1E293B")
-            for r in ws.iter_rows():
-                for c in r: c.alignment = Alignment(horizontal="center", vertical="center")
-            for i, w in enumerate([34, 22, 12, 22]): ws.column_dimensions[chr(ord("A") + i)].width = w
-            for c in ws["C"][1:]: c.number_format = "@"
-            ws.freeze_panes = "A2"
-            wb.save(caminho)
-            if messagebox.askyesno("Salvo", "Pretende abrir agora?", parent=self.root): os.startfile(caminho)
-        except OSError as e: messagebox.showerror("Erro", str(e), parent=self.root)
+            cabecalho, itens, logos = self._coletar_dados()
+        except ValueError as erro:
+            messagebox.showwarning("Dados inválidos", str(erro))
+            return
 
-    def _mostrar_janela_revisao_ocr(self, texto: str) -> None:
-        janela = tk.Toplevel(self.root)
-        janela.title("Revisar Texto do Gemini")
-        janela.geometry("640x500")
-        janela.grab_set()
-        tk.Label(janela, text="Verifique o texto lido pelo Gemini antes de inserir:", font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=15, pady=(15, 5))
-        botoes = tk.Frame(janela)
-        botoes.pack(side="bottom", fill="x", padx=15, pady=15)
-        txt = scrolledtext.ScrolledText(janela, font=("Segoe UI", 10), undo=True)
-        txt.pack(fill="both", expand=True, padx=15, pady=(0, 5))
-        txt.insert(tk.END, texto)
-        def usar(substituir: bool, organizar: bool = False):
-            v = txt.get("1.0", tk.END).strip()
-            if substituir: self.text_area.delete("1.0", tk.END)
-            self.text_area.insert(tk.END, ("\n" if not substituir else "") + v)
-            janela.destroy()
-            if organizar: self.processar_texto()
-        tk.Button(botoes, text="✨ Usar e Organizar", command=lambda: usar(True, True), bg="#2563EB", fg="white", font=("Segoe UI", 9, "bold"), padx=10, pady=6).pack(side="right", padx=5)
-        tk.Button(botoes, text="Substituir", command=lambda: usar(True), bg="#475569", fg="white", font=("Segoe UI", 9, "bold"), padx=10, pady=6).pack(side="right", padx=5)
-        tk.Button(botoes, text="Somar", command=lambda: usar(False), bg="#16A34A", fg="white", font=("Segoe UI", 9, "bold"), padx=10, pady=6).pack(side="right", padx=5)
+        formato = self.var_formato.get().upper()
+        empresa_menor_preco = self.var_menor_preco.get()
+        apenas_menor_preco = (self.var_modo_geracao.get() == "Apenas Menor Preço")
 
-    def abrir_editor_regras(self) -> None:
-        janela = tk.Toplevel(self.root)
-        janela.title("Tamanhos e Conversões")
-        janela.geometry("760x560")
-        janela.grab_set()
+        try:
+            gerador = GeradorOrcamento(cabecalho, itens, formato, logos)
+            caminhos = gerador.gerar(empresa_menor_preco, apenas_menor_preco)
+        except Exception as erro:
+            messagebox.showerror("Erro ao gerar", f"Ocorreu um erro inesperado:\n{erro}")
+            return
 
-        corpo = tk.Frame(janela, padx=20, pady=20)
-        corpo.pack(fill="both", expand=True)
-        corpo.columnconfigure(0, weight=1)
-        corpo.columnconfigure(1, weight=2)
-        corpo.rowconfigure(1, weight=1)
+        txt_gerados = "Orçamento gerado" if apenas_menor_preco else "Os 3 orçamentos (Menor Preço + 2 sorteados) foram gerados"
 
-        tk.Label(corpo, text="Ordem Produção (Um por linha)", font=("Segoe UI", 9, "bold")).grid(row=0, column=0, sticky="w")
-        tk.Label(corpo, text="Regras: ESCRITO = TAMANHO", font=("Segoe UI", 9, "bold")).grid(row=0, column=1, sticky="w", padx=(10, 0))
-        txt_ordem = scrolledtext.ScrolledText(corpo, width=18, font=("Consolas", 10))
-        txt_ordem.grid(row=1, column=0, sticky="nsew", pady=5)
-        txt_ordem.insert("1.0", "\n".join(self.ordem_tamanhos))
-        txt_conv = scrolledtext.ScrolledText(corpo, font=("Consolas", 10))
-        txt_conv.grid(row=1, column=1, sticky="nsew", padx=(10, 0), pady=5)
-        txt_conv.insert("1.0", "\n".join(f"{k} = {v}" for k, v in self.conversoes.items()))
+        mensagem = (
+            f"{txt_gerados} com sucesso em formato {formato}!\n\n"
+            f"Salvo(s) na pasta:\n{cabecalho.pasta_destino}\n\n"
+            f"Empresa de menor preço (0%): {empresa_menor_preco}"
+        )
+        messagebox.showinfo("Sucesso!", mensagem)
 
-        def salvar():
-            ordem = list(dict.fromkeys(l.strip().upper() for l in txt_ordem.get("1.0", tk.END).splitlines() if l.strip()))
-            conversoes = {}
-            for linha in txt_conv.get("1.0", tk.END).splitlines():
-                if not linha.strip(): continue
-                de, sep, para = linha.partition("=")
-                if sep: conversoes[de.strip().upper()] = para.strip().upper()
-            self.ordem_tamanhos, self.conversoes = ordem, conversoes
-            self.parser = ParserPedidos(self.ordem_tamanhos, self.conversoes)
-            self.salvar_config()
-            self._redesenhar_tabela()
-            janela.destroy()
-
-        tk.Button(corpo, text="💾 Salvar Modificações", command=salvar, bg="#2563EB", fg="white", font=("Segoe UI", 9, "bold"), pady=8).grid(row=2, column=1, sticky="e", pady=(10, 0))
+        if self.var_abrir_auto.get():
+            for caminho in caminhos:
+                abrir_arquivo(caminho)
 
 
 if __name__ == "__main__":
     root = tk.Tk()
-    app = AplicativoPedidosMagico(root)
+    app = OrcamentoApp(root)
     root.mainloop()
