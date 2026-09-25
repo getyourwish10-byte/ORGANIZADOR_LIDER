@@ -30,7 +30,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox, filedialog
 
-__version__ = "1.7.0"
+__version__ = "1.7.3"
 URL_VERSAO_REMOTE = "https://raw.githubusercontent.com/getyourwish10-byte/ORGANIZADOR_LIDER/refs/heads/main/version.json"
 
 try:
@@ -64,7 +64,10 @@ try:
     from google.genai import types
     GEMINI_DISPONIVEL = True
     GEMINI_API_KEY = "AQ.Ab8RN6IQWMqG23r21vC33BMkc7agknCeYDMYWvB7ECU94W6KOw"
+    
+    # Força a variável de ambiente para o novo SDK reconhecer a chave sem erros de OAuth
     if GEMINI_API_KEY and GEMINI_API_KEY != "COLE_SUA_CHAVE_GEMINI_AQUI":
+        os.environ["GEMINI_API_KEY"] = GEMINI_API_KEY
         CLIENTE_GEMINI = genai.Client(api_key=GEMINI_API_KEY)
     else:
         CLIENTE_GEMINI = None
@@ -783,7 +786,7 @@ class AplicativoPedidosMagico:
         try:
             def chamada():
                 return CLIENTE_GEMINI.models.generate_content(
-                    model='gemini-2.5-flash',
+                    model='gemini-3.8-flash',
                     contents=self._prompt_ia(texto),
                     config=types.GenerateContentConfig(
                         response_mime_type="application/json",
@@ -845,7 +848,7 @@ class AplicativoPedidosMagico:
             
             def chamada():
                 return CLIENTE_GEMINI.models.generate_content(
-                    model='gemini-2.5-flash',
+                    model='gemini-3.8-flash',
                     contents=[prompt, img]
                 )
 
