@@ -558,13 +558,29 @@ class AplicativoPedidosMagico:
 
     def _resultado_atualizacao(self, dados: dict, silencioso: bool) -> None:
         remota = str(dados.get("version", ""))
+        
+        # Se não há versão remota ou se a remota é menor/igual à atual, não faz nada
         if not remota or versao_tupla(remota) <= versao_tupla(__version__):
             self.set_status(f"✅ Versão {__version__} atualizada.", 100)
             if not silencioso: messagebox.showinfo("Atualizações", "Já tem a versão mais recente!", parent=self.root)
             return
-        self.set_status(f"Nova versão {remota} disponível!", 100)
-        if messagebox.askyesno("Atualização", f"Nova versão {remota} disponível!\nNovidades:\n{dados.get('changelog', '')}\n\nAtualizar agora?", parent=self.root):
-            threading.Thread(target=self._baixar_atualizacao, args=(dados.get("url", ""), dados.get("sha256")), daemon=True).start()
+
+        # SE CHEGOU AQUI: Tem uma atualização no GitHub!
+        self.set_status(f"A descarregar nova versão {remota}...", 50)
+        
+        # Pode mostrar um aviso para o utilizador não fechar o programa
+        messagebox.showinfo(
+            "Atualização Automática", 
+            f"Uma nova versão ({remota}) foi encontrada!\n\nO programa vai descarregar, atualizar sozinho e reiniciar em instantes.", 
+            parent=self.root
+        )
+
+        # Inicia o download e a instalação AUTOMATICAMENTE sem perguntar (askyesno removido)
+        threading.Thread(
+            target=self._baixar_atualizacao, 
+            args=(dados.get("url", ""), dados.get("sha256")), 
+            daemon=True
+        ).start()
 
     def _baixar_atualizacao(self, url: str, sha256_esperado: Optional[str]) -> None:
         caminho_atual = os.path.abspath(sys.executable if getattr(sys, "frozen", False) else sys.argv[0])
